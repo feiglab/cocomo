@@ -34,7 +34,7 @@ jobs:
 
       - name: Lint (Ruff) and format check (Black)
         run: |
-          ruff src tests
+          ruff check src tests
           black --check src tests
 
       - name: Run tests (pytest via the same interpreter)

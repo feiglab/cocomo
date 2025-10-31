@@ -1,65 +1,72 @@
 from __future__ import annotations
+
+import gzip
+import io
+import re
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Optional, Tuple, Union, Set, Sequence
-import re, gzip, io, math
 
 import mdtraj as md
 import numpy as np
 
 try:
-   from openmm import unit, Vec3
+    from openmm import Vec3, unit
 except Exception:
-   from simtk import unit
-   from simtk.openmm import Vec3
+    from simtk import unit
+    from simtk.openmm import Vec3
 
-Number = Union[int, float]
+Number = int | float
 
 # --- Data containers ---------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class Atom:
     serial: int
-    name: str                 # e.g. "CA"
-    element: str              # 'H', 'C', 'O', 'N', 'S', 'P' 'CL', 'SOD', 'MG', 'CA' 
-    resname: str              # e.g. "ALA"
-    chain: str                # original PDB chain ID
-    resnum: int               # residue sequence number
+    name: str  # e.g. "CA"
+    element: str  # 'H', 'C', 'O', 'N', 'S', 'P' 'CL', 'SOD', 'MG', 'CA'
+    resname: str  # e.g. "ALA"
+    chain: str  # original PDB chain ID
+    resnum: int  # residue sequence number
     x: float
     y: float
     z: float
-    seg: str                  # segment ID (may be "")
+    seg: str  # segment ID (may be "")
 
     def __repr__(self) -> str:
         return f"<atom {self.name} {self.resname} {self.resnum} {self.chain} {self.seg}>"
 
+
 @dataclass
 class Residue:
     resname: str
-    chain: str                # original PDB chain ID
+    chain: str  # original PDB chain ID
     resnum: int
-    seg:   str                # segment ID
-    atoms: List[Atom] = field(default_factory=list)
+    seg: str  # segment ID
+    atoms: list[Atom] = field(default_factory=list)
 
     def __repr__(self) -> str:
         return f"<residue {self.resname} {self.resnum} {self.chain} {self.seg}>"
 
+
 @dataclass
 class Chain:
-    key_id: str                               # key used in Structure.models[...].chains
-    residues: List[Residue] = field(default_factory=list)
-    seg_id: Optional[str] = None              # segment ID if grouping by seg
-    chain_id: Optional[str] = None            # chain ID from PDB
+    key_id: str  # key used in Structure.models[...].chains
+    residues: list[Residue] = field(default_factory=list)
+    seg_id: str | None = None  # segment ID if grouping by seg
+    chain_id: str | None = None  # chain ID from PDB
 
     def __repr__(self) -> str:
         return f"<chain {self.key_id} : segment {self.seg_id} chain {self.chain_id}>"
 
+
 @dataclass
 class Model:
     model_id: int
-    chain: Dict[str, Chain] = field(default_factory=dict)   # key_id -> Chain
-    residues: List[Residue] = field(default_factory=list)
-    atoms: List[Atom] = field(default_factory=list)
+    chain: dict[str, Chain] = field(default_factory=dict)  # key_id -> Chain
+    residues: list[Residue] = field(default_factory=list)
+    atoms: list[Atom] = field(default_factory=list)
 
     def chains(self) -> Iterator[Chain]:
         return iter(self.chain.values())
@@ -67,13 +74,13 @@ class Model:
     def iter_residues(self) -> Iterator[Residue]:
         for c in self.chain.values():
             for r in c.residues:
-                yield r
+                yield from r
 
     def iter_atoms(self) -> Iterator[Atom]:
         for c in self.chain.values():
             for r in c.residues:
                 for a in r.atoms:
-                    yield a
+                    yield from a
 
     def __repr__(self) -> str:
         n_chains = len(self.chain)
@@ -95,7 +102,7 @@ class Model:
 
     # ---- selections on a single Model ----
 
-    def _select_by_index_set(self, keep: Set[int]) -> "Model":
+    def _select_by_index_set(self, keep: set[int]) -> Model:
         """Internal: build a new Model with only atoms whose model-local indices are in `keep`."""
         m2 = Model(model_id=self.model_id)
         if not keep or not self.atoms:
@@ -109,7 +116,7 @@ class Model:
                 chain_id=getattr(ch, "chain_id", None),
             )
             for r in ch.residues:
-                kept_atoms: List[Atom] = []
+                kept_atoms: list[Atom] = []
                 for a in r.atoms:
                     running_idx += 1
                     if running_idx in keep:
@@ -117,7 +124,11 @@ class Model:
                         m2.atoms.append(a)
                 if kept_atoms:
                     new_res = Residue(
-                        resname=r.resname, chain=r.chain, resnum=r.resnum, seg=r.seg, atoms=kept_atoms
+                        resname=r.resname,
+                        chain=r.chain,
+                        resnum=r.resnum,
+                        seg=r.seg,
+                        atoms=kept_atoms,
                     )
                     new_chain.residues.append(new_res)
                     m2.residues.append(new_res)
@@ -126,17 +137,17 @@ class Model:
         return m2
 
     @staticmethod
-    def _flatten_indices(indices: Union[List[int], List[List[int]]]) -> List[int]:
+    def _flatten_indices(indices: list[int] | list[list[int]]) -> list[int]:
         if not indices:
             return []
         if isinstance(indices[0], (list, tuple)):
-            out: List[int] = []
+            out: list[int] = []
             for sub in indices:  # type: ignore[assignment]
                 out.extend(int(i) for i in sub)
             return out
         return [int(i) for i in indices]  # type: ignore[return-value]
 
-    def select_byindex(self, indices: Union[List[int], List[List[int]]]) -> "Model":
+    def select_byindex(self, indices: list[int] | list[list[int]]) -> Model:
         """
         Return a new Model containing only atoms at the given 0-based indices
         (per this model's atom order). Accepts a flat list or list-of-lists.
@@ -146,12 +157,12 @@ class Model:
         keep = {i for i in flat if isinstance(i, int) and i >= 0}
         return self._select_by_index_set(keep)
 
-    def select_CA(self) -> "Model":
+    def select_CA(self) -> Model:
         """Return a new Model containing only CA atoms."""
         keep = {i for i, a in enumerate(self.atoms) if a.name == "CA"}
         return self._select_by_index_set(keep)
 
-    def select_bystring(self, spec: str) -> "Model":
+    def select_bystring(self, spec: str) -> Model:
         """
         Return a new Model using a textual selection `spec` via DomainSelector.
         This method builds a temporary single-model Structure to reuse the selector.
@@ -170,7 +181,8 @@ class Model:
         temp_struct = Structure(models=[self])
 
         sel = DomainSelector(raw)
-        idx_lists = sel.atom_lists(temp_struct, model_index=0)  # list-of-lists (per selector semantics)
+        # list-of-lists (per selector semantics)
+        idx_lists = sel.atom_lists(temp_struct, model_index=0)
         return self.select_byindex(idx_lists)
 
     def _to_mdtraj(self):
@@ -223,10 +235,13 @@ class Model:
         traj = md.Trajectory(xyz=xyz, topology=top)
         return traj, residue_keys
 
-
-    def sasa_by_residue( self, *, 
-         probe_radius: float = 0.14, n_sphere_points: int = 960, radii: str = "bondi",
-                       ) -> Dict[Tuple[str, int, str], float]:
+    def sasa_by_residue(
+        self,
+        *,
+        probe_radius: float = 0.14,
+        n_sphere_points: int = 960,
+        radii: str = "bondi",
+    ) -> dict[tuple[str, int, str], float]:
         """
         Fast SASA (nm^2) per residue using MDTraj Shrake–Rupley with Bondi radii.
         Parameters
@@ -253,11 +268,12 @@ class Model:
 
         return per_res_nm2
 
+
 @dataclass
 class Structure:
-    models: List[Model] = field(default_factory=list)
+    models: list[Model] = field(default_factory=list)
 
-    def __getitem__(self, idx: int | slice) -> Model | List[Model]:
+    def __getitem__(self, idx: int | slice) -> Model | list[Model]:
         return self.models[idx]
 
     def __len__(self) -> int:
@@ -277,7 +293,7 @@ class Structure:
         """Positions for the selected model as Quantity[list[Vec3]] in nm."""
         return self.models[model_index].openmm_positions()
 
-    def select_CA(self) -> "Structure":
+    def select_CA(self) -> Structure:
         """Apply CA selection to each model; return a new Structure."""
         out = Structure()
         for m in self.models:
@@ -286,7 +302,7 @@ class Structure:
             out.models.append(Model(model_id=1))
         return out
 
-    def select_byindex(self, indices: Union[List[int], List[List[int]]]) -> "Structure":
+    def select_byindex(self, indices: list[int] | list[list[int]]) -> Structure:
         """
         Apply the same index selection to each model; return a new Structure.
         Indices are interpreted per-model (0-based within each model).
@@ -298,7 +314,7 @@ class Structure:
             out.models.append(Model(model_id=1))
         return out
 
-    def select_bystring(self, spec: str) -> "Structure":
+    def select_bystring(self, spec: str) -> Structure:
         """
         Apply textual selection to each model independently (chains/residues resolved per model);
         return a new Structure.
@@ -310,9 +326,14 @@ class Structure:
             out.models.append(Model(model_id=1))
         return out
 
-    def sasa_by_residue( self, *, model_index: int = 0,
-        probe_radius: float = 0.14, n_sphere_points: int = 960, radii: str = "bondi",
-                       ) -> Dict[Tuple[str, int, str], float]:
+    def sasa_by_residue(
+        self,
+        *,
+        model_index: int = 0,
+        probe_radius: float = 0.14,
+        n_sphere_points: int = 960,
+        radii: str = "bondi",
+    ) -> dict[tuple[str, int, str], float]:
         """
         Compute SASA (nm^2) by residue for a chosen model (default 0) via MDTraj.
         """
@@ -326,24 +347,26 @@ class Structure:
             radii=radii,
         )
 
+
 # --- Parser ------------------------------------------------------------------
+
 
 class PDBReader:
     """
-    Minimal, fast PDB reader 
+    Minimal, fast PDB reader
     - Supports MODEL/ENDMDL (multiple models).
     - Parses ATOM.
     - Groups atoms into chains keyed by SEGID when available; else by PDB chain ID with
       automatic suffixing (A, A1, A2, ...) when non-contiguous repeats occur.
     """
 
-    def __new__(cls, file: FileLike | None = None):
+    def __new__(cls, file: str | (Path, io.BytesIO, io.StringIO) | None = None):
         self = super().__new__(cls)
         if file is None:
             return self
         return cls._read_direct(file)
 
-    def read(self, file: Union[str, Path, io.BytesIO, io.StringIO]) -> Structure:
+    def read(self, file: str | (Path, io.BytesIO, io.StringIO)) -> Structure:
         text_iter = self._open_text(file)
         return self._parse(text_iter)
 
@@ -353,7 +376,7 @@ class PDBReader:
     # -- internals --
 
     @staticmethod
-    def _open_text(file: Union[str, Path, io.BytesIO, io.StringIO]) -> Iterable[str]:
+    def _open_text(file: str | (Path, io.BytesIO, io.StringIO)) -> Iterable[str]:
         if isinstance(file, (io.StringIO, io.BytesIO)):
             if isinstance(file, io.BytesIO):
                 return io.TextIOWrapper(file, encoding="utf-8", newline="").read().splitlines()
@@ -362,22 +385,22 @@ class PDBReader:
         if p.suffix == ".gz":
             with gzip.open(p, "rt", encoding="utf-8", newline="") as fh:
                 return fh.read().splitlines()
-        with open(p, "rt", encoding="utf-8", newline="") as fh:
+        with open(p, encoding="utf-8", newline="") as fh:
             return fh.read().splitlines()
 
     @classmethod
-    def _read_direct(cls, file:FileLike) -> Structure:
+    def _read_direct(cls, file: str | (Path, io.BytesIO, io.StringIO)) -> Structure:
         return cls._parse(cls._open_text(file))
 
     @staticmethod
     def _parse(lines: Iterable[str]) -> Structure:
         s = Structure()
-        current_model: Optional[Model] = None
+        current_model: Model | None = None
 
         # State for allocating fallback chain keys when SEGID is absent
         # counts['A'] -> how many extra chains created beyond the first contiguous block
-        fallback_counts: Dict[str, int] = {}
-        last_chain_id_seen: Optional[str] = None  # last PDB chain ID encountered (for contiguity)
+        fallback_counts: dict[str, int] = {}
+        last_chain_id_seen: str | None = None  # last PDB chain ID encountered (for contiguity)
 
         def alloc_chain_key(atom: Atom) -> str:
             """Return chain key for this atom per rules."""
@@ -385,7 +408,8 @@ class PDBReader:
             if atom.seg.strip():
                 # Primary rule: group by segment ID, exactly as key
                 key = atom.seg.strip()
-                last_chain_id_seen = atom.chain  # still track for correctness across TER, but not used for seg
+                # still track for correctness across TER, but not used for seg
+                last_chain_id_seen = atom.chain
                 return key
 
             # Fallback: group by PDB chain ID, splitting non-contiguous repeats
@@ -396,7 +420,8 @@ class PDBReader:
                 last_chain_id_seen = cid
                 return key
 
-            # If we are still in the same contiguous block (cid has not changed since last atom), keep using it
+            # If we are still in the same contiguous block (cid has not changed since last atom),
+            # keep using it
             if last_chain_id_seen == cid:
                 return cid if cid in s.models[-1].chain else cid
 
@@ -413,7 +438,7 @@ class PDBReader:
                 ch = Chain(key_id=key, seg_id=(atom.seg.strip() or None))
                 m.chain[key] = ch
             # record original PDB chain id
-            ch.chain_id=(atom.chain or " ")
+            ch.chain_id = atom.chain or " "
             return ch
 
         def add_atom_to_model(m: Model, atom: Atom):
@@ -457,8 +482,9 @@ class PDBReader:
                 continue
 
             if rec == "TER":
-                # TER terminates a chain segment. Ensure a subsequent atom with the same PDB chain ID
-                # will start a new chain (e.g., A -> TER -> A becomes A1).
+                # TER terminates a chain segment
+                # subsequent atom with the same PDB chain ID will start a new chain
+                # (e.g., A -> TER -> A becomes A1).
                 last_chain_id_seen = None
                 continue
 
@@ -469,6 +495,7 @@ class PDBReader:
 
 # --- parsing utilities -------------------------------------------------------
 
+
 def _deduce_element(atomname: str, resname: str, element_hint: str = "") -> str:
     """
     Deduce an element symbol following user rules.
@@ -478,6 +505,7 @@ def _deduce_element(atomname: str, resname: str, element_hint: str = "") -> str:
       3) First-letter rules C/N/H/S/P/O (after stripping leading digits in atom name).
       4) Fallback: atom name with digits removed (uppercased).
     """
+
     def clean(token: str) -> str:
         # keep only letters, upcase
         return re.sub(r"[^A-Za-z]", "", token or "").upper()
@@ -526,7 +554,7 @@ def _deduce_element(atomname: str, resname: str, element_hint: str = "") -> str:
 
 def _parse_atom_line(line: str) -> Atom:
     # PDB v3.3 column mapping, simplified
-    serial = _safe_int(line[4:11], required=True)   # left as in your version
+    serial = _safe_int(line[4:11], required=True)  # left as in your version
     name = line[12:16].strip()
     resname = line[17:21].strip()
     chain = (line[21] if len(line) >= 22 else " ").strip()
@@ -537,10 +565,21 @@ def _parse_atom_line(line: str) -> Atom:
     seg = (line[72:76] if len(line) >= 76 else " ").strip()
     element_hint = (line[76:78] if len(line) >= 78 else "").strip()
     element = _deduce_element(name, resname, element_hint)
-    return Atom(serial=serial, name=name, element=element, resname=resname, chain=chain,
-                resnum=resnum, x=x, y=y, z=z, seg=seg)
+    return Atom(
+        serial=serial,
+        name=name,
+        element=element,
+        resname=resname,
+        chain=chain,
+        resnum=resnum,
+        x=x,
+        y=y,
+        z=z,
+        seg=seg,
+    )
 
-def _safe_int(s: str, default: Optional[int] = None, required: bool = False) -> Optional[int]:
+
+def _safe_int(s: str, default: int | None = None, required: bool = False) -> int | None:
     try:
         return int(s.strip())
     except Exception:
@@ -548,7 +587,8 @@ def _safe_int(s: str, default: Optional[int] = None, required: bool = False) -> 
             raise ValueError(f"Expected integer in field '{s}'")
         return default
 
-def _safe_float(s: str, default: Optional[float] = None, required: bool = False) -> Optional[float]:
+
+def _safe_float(s: str, default: float | None = None, required: bool = False) -> float | None:
     try:
         return float(s.strip())
     except Exception:
@@ -556,32 +596,36 @@ def _safe_float(s: str, default: Optional[float] = None, required: bool = False)
             raise ValueError(f"Expected float in field '{s}'")
         return default
 
-def _res_id(r: Residue) -> Tuple[str, str, int, str]:
+
+def _res_id(r: Residue) -> tuple[str, str, int, str]:
     return (r.resname, r.chain, r.resnum, r.seg)
 
 
 # ---- DomainSelector ----------------------------------------------------------
 
+
 class SelectionError(ValueError):
     """Raised when a selection term cannot be parsed or resolved."""
 
+
 # ----------------------------- parsing primitives ----------------------------
+
 
 @dataclass(frozen=True)
 class ResidueSelector:
     """Represents residue selection for a chain (or all chains)."""
 
     all_residues: bool
-    ranges: Tuple[Tuple[int, int], ...] = ()  # inclusive ranges; singletons are (n, n)
+    ranges: tuple[tuple[int, int], ...] = ()  # inclusive ranges; singletons are (n, n)
 
     @staticmethod
-    def parse(spec: str) -> "ResidueSelector":
+    def parse(spec: str) -> ResidueSelector:
         s = spec.strip().lower()
         if s == "all":
             return ResidueSelector(all_residues=True)
 
         toks = [t for t in re.split(r"[.:]", spec) if t.strip()]
-        ranges: List[Tuple[int, int]] = []
+        ranges: list[tuple[int, int]] = []
         for t in toks:
             t = t.strip()
             if "-" in t:
@@ -616,11 +660,11 @@ class ResidueSelector:
 class Term:
     """One selection term: chains (or None for all chains) + residue selector (or all)."""
 
-    chains: Optional[Tuple[str, ...]]  # None => all chains
+    chains: tuple[str, ...] | None  # None => all chains
     residues: ResidueSelector
 
 
-def _parse_chain_list(s: str) -> Tuple[str, ...]:
+def _parse_chain_list(s: str) -> tuple[str, ...]:
     ids = [tok for tok in s.split(":") if tok.strip()]
     if not ids:
         raise SelectionError(f"Empty chain list in '{s}'")
@@ -636,6 +680,7 @@ def _looks_like_residue_spec(s: str) -> bool:
 
 
 # ----------------------------- public selector -------------------------------
+
 
 class DomainSelector:
     """
@@ -666,23 +711,23 @@ class DomainSelector:
         self._terms = self._parse(spec)
         self._has_explicit_chains = any(t.chains is not None for t in self._terms)
 
-    def atom_lists(self, structure: Union["Structure", "Model"], model_index: int = 0) -> List[List[int]]:
+    def atom_lists(self, structure: Structure | Model, model_index: int = 0) -> list[list[int]]:
         """
         Return one or more atom lists (each sorted, 0-based indices into Model.atoms)
         according to the spec aggregation rule described in the class docstring.
         """
-        if isinstance(structure,Structure):
-           model = structure.models[model_index]
+        if isinstance(structure, Structure):
+            model = structure.models[model_index]
         else:
-           model = structure
+            model = structure
         atom_to_idx = {id(a): i for i, a in enumerate(model.atoms)}
 
         # Map: alias_key -> set(resnums) selected for that alias
-        alias_to_resnums: Dict[str, Set[int]] = self._resolve_residues(model)
+        alias_to_resnums: dict[str, set[int]] = self._resolve_residues(model)
 
         if self._has_explicit_chains:
             # Pool across all chains referenced by the terms.
-            pooled: Set[int] = set()
+            pooled: set[int] = set()
             for ch in model.chains():
                 resnums = _union_resnums_for_chain(ch, alias_to_resnums)
                 if not resnums:
@@ -696,12 +741,12 @@ class DomainSelector:
             return [sorted(pooled)]
 
         # No chains specified in any term: emit one list per chain (if any residues selected)
-        lists: List[List[int]] = []
+        lists: list[list[int]] = []
         for ch in model.chains():
             resnums = _union_resnums_for_chain(ch, alias_to_resnums)
             if not resnums:
                 continue
-            out: Set[int] = set()
+            out: set[int] = set()
             for r in ch.residues:
                 if r.resnum in resnums:
                     for a in r.atoms:
@@ -711,15 +756,15 @@ class DomainSelector:
             lists.append(sorted(out))
         return lists
 
-    def atom_indices(self, structure: Union["Structure", "Model"], model_index: int = 0) -> List[int]:
-        """Flattened union of all lists returned by atom_lists().""" 
+    def atom_indices(self, structure: Structure | Model, model_index: int = 0) -> list[int]:
+        """Flattened union of all lists returned by atom_lists()."""
         lists = self.atom_lists(structure, model_index=model_index)
-        merged: Set[int] = set()
+        merged: set[int] = set()
         for lst in lists:
             merged.update(lst)
         return sorted(merged)
 
-    def residue_keys(self, structure: Structure, model_index: int = 0) -> List[Tuple[str, int]]:
+    def residue_keys(self, structure: Structure, model_index: int = 0) -> list[tuple[str, int]]:
         """
         Return sorted (chain_key_id, residue_number) present in the selection.
         If explicit chains are used: union across selected chains.
@@ -728,7 +773,7 @@ class DomainSelector:
         model = structure.models[model_index]
         alias_to_resnums = self._resolve_residues(model)
 
-        out: Set[Tuple[str, int]] = set()
+        out: set[tuple[str, int]] = set()
         for ch in model.chains():
             resnums = _union_resnums_for_chain(ch, alias_to_resnums)
             if not resnums:
@@ -740,21 +785,21 @@ class DomainSelector:
 
     # --------------------------- internals ------------------------------------
 
-    def _resolve_residues(self, model: Model) -> Dict[str, Set[int]]:
+    def _resolve_residues(self, model: Model) -> dict[str, set[int]]:
         """
         Return a mapping from ANY acceptable chain alias (key_id, seg_id, chain_id)
         to a set of residue numbers selected for that alias.
         """
         # Collect alias universe
-        all_aliases: Set[str] = set()
-        chain_by_alias: Dict[str, Chain] = {}
+        all_aliases: set[str] = set()
+        chain_by_alias: dict[str, Chain] = {}
         for ch in model.chains():
             for k in _all_chain_aliases(ch):
                 if k is not None:
                     all_aliases.add(k)
                     chain_by_alias[k] = ch
 
-        selected: Dict[str, Set[int]] = {}
+        selected: dict[str, set[int]] = {}
 
         for term in self._terms:
             # Determine target aliases for this term
@@ -762,7 +807,7 @@ class DomainSelector:
                 target_aliases = set(all_aliases)
             else:
                 target_aliases = set()
-                unknown: List[str] = []
+                unknown: list[str] = []
                 for tok in term.chains:
                     if tok in all_aliases:
                         target_aliases.add(tok)
@@ -789,8 +834,8 @@ class DomainSelector:
         return selected
 
     @staticmethod
-    def _parse(spec: str) -> Tuple[Term, ...]:
-        terms: List[Term] = []
+    def _parse(spec: str) -> tuple[Term, ...]:
+        terms: list[Term] = []
         for raw_term in spec.split():
             t = raw_term.strip()
             if not t:
@@ -823,8 +868,9 @@ class DomainSelector:
 
 # ----------------------------- helpers ---------------------------------------
 
-def _all_chain_aliases(ch: Chain) -> Tuple[str, ...]:
-    out: List[str] = []
+
+def _all_chain_aliases(ch: Chain) -> tuple[str, ...]:
+    out: list[str] = []
     if getattr(ch, "key_id", None):
         out.append(str(ch.key_id))
     if getattr(ch, "seg_id", None):
@@ -841,11 +887,9 @@ def _all_chain_aliases(ch: Chain) -> Tuple[str, ...]:
     return tuple(uniq)
 
 
-def _union_resnums_for_chain(ch: Chain, alias_to_resnums: Dict[str, Set[int]]) -> Set[int]:
+def _union_resnums_for_chain(ch: Chain, alias_to_resnums: dict[str, set[int]]) -> set[int]:
     """Union residue sets across all aliases of a chain."""
-    resnums: Set[int] = set()
+    resnums: set[int] = set()
     for alias in _all_chain_aliases(ch):
         resnums |= alias_to_resnums.get(alias, set())
     return resnums
-
-

@@ -1,6 +1,6 @@
-from cocomo import COCOMO, PDBReader, DomainSelector
+from cocomo import COCOMO
+
 
 def test_describe():
-    m=COCOMO()
+    m = COCOMO()
     assert "COCOMO" in m.describe()
-

@@ -1,8 +1,10 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+.ruff_cache
 dist/
 build/
+devreadme
 .ipynb_checkpoints/
 .venv/
 .env

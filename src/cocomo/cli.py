@@ -1,8 +1,11 @@
 from __future__ import annotations
-import argparse, json
+
+import argparse
+import json
+
 from .__version__ import __version__
 from .cocomocg import COCOMO
-from .structure import PDBReader, DomainSelector
+
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="cocomo", description="COCOMO coarse-grained model")
@@ -14,9 +17,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp_sim.set_defaults(func=_cmd_info)
     return p
 
+
 def _cmd_info(args: argparse.Namespace) -> None:
     c = COCOMO()
     print(json.dumps({"model": c.describe()}, indent=2))
+
 
 def main() -> None:
     parser = build_parser()
@@ -25,6 +30,7 @@ def main() -> None:
         args.func(args)
     else:
         parser.print_help()
+
 
 if __name__ == "__main__":
     main()
