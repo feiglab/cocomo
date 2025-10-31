@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cocomo"
+version = "1.0.0"
+description = "COCOMO coarse-grained model."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [{ name = "Feig Lab", email="mfeiglab@gmail.com" }]
+classifiers = [
+  "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+  "Programming Language :: Python :: 3",
+  "Operating System :: OS Independent",
+]
+dependencies = [
+  "numpy>=2.0",
+  "openmm>=8.0",
+  "mdtraj>=1.11",
+]  
+
+[project.optional-dependencies]
+dev = [
+   "pytest>=8",
+   "ruff>=0.6",
+   "black>=24",
+]
+
+[project.urls]
+Homepage = "https://github.com/feiglab/cocomo"
+
+[project.scripts]
+cocomo = "cocomo.cli:main"
+
+[tool.black]
+line-length = 100
+target-version = ["py39"]
+
+[tool.ruff]
+line-length = 100
+select = ["E","F","I","UP"]
+src = ["src"]
+

@@ -1,17 +1,23 @@
-# cocomo
+# COCOMO
 
-The code in this repository gives an example for running the COncentration-dependent COarse-grained MOdel.
+COCOMO is the COncentration-dependent COarse-grained MOdel.
 
-The latest version is COCOMO2 described here:
+This is a package for installation with pip:
 
-Alexander Jussupow, Divya Bartley, Lisa J. Lapidus, Michael Feig:
-COCOMO2: A coarse-grained model for interacting folded and disordered proteins 
-2025
+pip install -e .
 
 
-The original version of COCOMO is described here:
+Legacy scripts can be found under legacy/
+
+References:
 
 Gilberto Valdes-Garcia, Lim Heo, Lisa J. Lapidus, and Michael Feig:
 Modeling concentration-dependent phase separation processes involving peptides and RNA via residue-based coarse-graining
 Journal of Chemical Theory and Computation 19 (2023): 669-678
+
+Alexander Jussupow, Divya Bartley, Lisa J. Lapidus, Michael Feig:
+COCOMO2: A coarse-grained model for interacting folded and disordered proteins 
+Journal of Chemical Theory and Computation 21 (2025): 2095-2107
+
+
 
