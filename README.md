@@ -1,5 +1,8 @@
 # COCOMO
 
+[![CI](https://github.com/feiglab/cocomo/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/feiglab/cocomo/actions/workflows/ci.yml)
+
+
 COCOMO is the COncentration-dependent COarse-grained MOdel.
 
 This is a package for installation with pip:
