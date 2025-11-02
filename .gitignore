@@ -8,4 +8,4 @@ devreadme
 .ipynb_checkpoints/
 .venv/
 .env
-
+notebooks/
