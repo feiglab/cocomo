@@ -17,7 +17,7 @@ from openmm import (
     Vec3,
     XmlSerializer,
 )
-from openmm.app import Simulation, Topology, element
+from openmm.app import Simulation
 from openmm.unit import (
     Quantity,
     amu,
@@ -29,8 +29,6 @@ from openmm.unit import (
     picoseconds,
     radian,
 )
-
-from .structure import Structure
 
 # --- Data containers ---------------------------------------------------------
 
@@ -88,6 +86,8 @@ RESIDUE_PARAMS_V1 = ResidueParameters(
         "GLU": ResPar(128.107, -1.0, 0.3279, epsilon_pol_v1, azero_pol_v1, 0.00),
         "GLY": ResPar(57.052, 0.0, 0.2617, epsilon_hp_v1, azero_hp_v1, 0.00),
         "HIS": ResPar(137.142, 0.0, 0.3338, epsilon_pol_v1, azero_pol_v1, 0.00),
+        "HSD": ResPar(137.142, 0.0, 0.3338, epsilon_pol_v1, azero_pol_v1, 0.00),
+        "HSE": ResPar(137.142, 0.0, 0.3338, epsilon_pol_v1, azero_pol_v1, 0.00),
         "ILE": ResPar(113.160, 0.0, 0.3360, epsilon_hp_v1, azero_hp_v1, 0.00),
         "LEU": ResPar(113.160, 0.0, 0.3363, epsilon_hp_v1, azero_hp_v1, 0.00),
         "LYS": ResPar(129.183, 1.0, 0.3439, epsilon_pol_v1, azero_pol_v1, 0.00),
@@ -123,6 +123,8 @@ RESIDUE_PARAMS_V2 = ResidueParameters(
         "GLU": ResPar(128.107, -1.0, 0.3279, epsilon_pol_v2, azero_pol_v2, 1.462),
         "GLY": ResPar(57.052, 0.0, 0.2617, epsilon_hp_v2, azero_hp_v2, 0.544),
         "HIS": ResPar(137.142, 0.0, 0.3338, epsilon_pol_v2, azero_pol_v2, 1.634),
+        "HSD": ResPar(137.142, 0.0, 0.3338, epsilon_pol_v2, azero_pol_v2, 1.634),
+        "HSE": ResPar(137.142, 0.0, 0.3338, epsilon_pol_v2, azero_pol_v2, 1.634),
         "ILE": ResPar(113.160, 0.0, 0.3360, epsilon_hp_v2, azero_hp_v2, 1.410),
         "LEU": ResPar(113.160, 0.0, 0.3363, epsilon_hp_v2, azero_hp_v2, 1.519),
         "LYS": ResPar(129.183, 1.0, 0.3439, epsilon_pol_v2, azero_pol_v2, 1.923),
@@ -183,6 +185,8 @@ aminoacids = [
     "GLU",
     "GLY",
     "HIS",
+    "HSD",
+    "HSE",
     "ILE",
     "LEU",
     "LYS",
@@ -194,8 +198,6 @@ aminoacids = [
     "TRP",
     "TYR",
     "VAL",
-    "HSD",
-    "HSE",
 ]
 
 nucleicacids = ["ADE", "CYT", "GUA", "URA", "THY"]
@@ -206,7 +208,7 @@ nucleicacids = ["ADE", "CYT", "GUA", "URA", "THY"]
 class COCOMO:
     def __init__(
         self,
-        structure: Structure | None = None,
+        topology=None,
         *,
         version=None,
         box=100,
@@ -222,8 +224,7 @@ class COCOMO:
         # cuton/cutoff: in nanometers
         # kappa: in nanometers
 
-        self.structure = structure
-        self.topology = self.topology_fromStructure(structure)
+        self.topology = topology
 
         if xml is not None:
             self.read_system(xml)
@@ -244,7 +245,7 @@ class COCOMO:
         self.setup_forces()
 
     def describe(self) -> str:
-        return f"COCOMO CG model version {self.version}"
+        return f"This is COCOMO CG model version {self.version}"
 
     def write_system(self, fname="system.xml"):
         with open(fname, "w") as file:
@@ -284,34 +285,6 @@ class COCOMO:
 
         if positions is not None:
             self.simulation.context.setPositions(positions)
-        else:
-            assert self.structure is not None, "need structure to be defined"
-            self.simulation.context.setPositions(self.structure.openmm_positions())
-
-    @staticmethod
-    def topology_fromStructure(structure: Structure | None = None):
-        if structure is None:
-            return None
-
-        top = Topology()
-        for c in structure.models[0].chains():
-            chain = top.addChain(c.key_id)
-            ca_atoms = []
-            for r in c.residues:
-                rname = r.resname
-                if rname == "HSD" or rname == "HSE":
-                    rname = "HIS"
-                res = top.addResidue(rname, chain)
-                for a in r.atoms:
-                    if a.name != "CA":
-                        raise ValueError("Only CA atoms are expected as COCOMO input")
-                    else:
-                        ca_atoms.append(top.addAtom(a.name, element=element.carbon, residue=res))
-
-            for i in range(len(ca_atoms) - 1):
-                top.addBond(ca_atoms[i], ca_atoms[i + 1])
-
-        return top
 
     def setup_particles(self) -> None:
         if self.topology is None:
@@ -352,6 +325,8 @@ class COCOMO:
         self, *, l0protein=bond_l0_protein, l0na=bond_l0_na, kprotein=bond_k_protein, kna=bond_k_na
     ) -> None:
         if self.topology is not None:
+            if self.topology.getNumBonds() == 0:
+                self.set_bonds()
             force = HarmonicBondForce()
             for bond in self.topology.bonds():
                 if bond[0].residue.name in aminoacids:
@@ -453,6 +428,8 @@ class COCOMO:
                 a0 = self.params[atom.residue.name].azero * (nanometer * kilojoule / mole) ** 0.5
                 force.addParticle([a, a0])
 
+            if self.topology.getNumBonds() == 0:
+                self.set_bonds()
             for bond in self.topology.bonds():
                 force.createExclusionsFromBonds([(bond[0].index, bond[1].index)], 1)
 
@@ -514,6 +491,8 @@ class COCOMO:
                 isNucleic = 1.0 if atom.residue.name in nucleicacids else 0.0
                 force.addParticle([sigma, epsilon, isCation, isAromatic, isNucleic])
 
+            if self.topology.getNumBonds() == 0:
+                self.set_bonds()
             for bond in self.topology.bonds():
                 force.createExclusionsFromBonds([(bond[0].index, bond[1].index)], 1)
 
@@ -568,6 +547,16 @@ class COCOMO:
         else:
             self.params = RESIDUE_PARAMS_V2
             self.eps = EPS_V2
+
+    def set_bonds(self):
+        if self.topology is not None:
+            for c in self.topology.chains():
+                atm = []
+                for r in c.residues():
+                    for a in r.atoms():
+                        atm.append(a)
+                for i in range(len(atm) - 1):
+                    self.topology.addBond(atm[i], atm[i + 1])
 
     @staticmethod
     def _normalize_box_nm(box) -> tuple[float, float, float]:

@@ -9,12 +9,8 @@ from pathlib import Path
 
 import mdtraj as md
 import numpy as np
-
-try:
-    from openmm import Vec3, unit
-except Exception:
-    from simtk import unit
-    from simtk.openmm import Vec3
+from openmm import Vec3, unit
+from openmm.app import Topology, element
 
 Number = int | float
 
@@ -90,7 +86,7 @@ class Model:
 
     __str__ = __repr__
 
-    def openmm_positions(self):
+    def positions(self):
         """
         Return positions as an OpenMM Quantity[list[Vec3]] in nanometers.
         Assumes internal coordinates are in Angstroms (PDB convention).
@@ -99,6 +95,19 @@ class Model:
         vecs = [Vec3(a.x, a.y, a.z) for a in self.atoms]
         # Attach Å units, then convert to nm to match PDBFile default
         return unit.Quantity(vecs, unit.angstrom).in_units_of(unit.nanometer)
+
+    def topology(self):
+        top = Topology()
+        for c in self.chains():
+            chain = top.addChain(c.key_id)
+            for r in c.residues:
+                rname = r.resname
+                res = top.addResidue(rname, chain)
+                for a in r.atoms:
+                    sym = (getattr(a, "element", "") or "").upper()
+                    el = element.Element.getBySymbol(sym) or element.carbon
+                    top.addAtom(a.name, element=el, residue=res)
+        return top
 
     # ---- selections on a single Model ----
 
@@ -185,55 +194,17 @@ class Model:
         idx_lists = sel.atom_lists(temp_struct, model_index=0)
         return self.select_byindex(idx_lists)
 
-    def _to_mdtraj(self):
-        """
-        Convert this Model to an mdtraj.Trajectory with a single frame.
-        Returns (traj, residue_keys) where residue_keys align with traj.topology.residues.
-        Each residue_key is (chain_id, resnum, resname) in file order.
-        """
-        top = md.Topology()
-        coords_nm = []
-        residue_keys = []
-
-        chain_obj = None
-        prev_chain_id = None
-        prev_res_id = None
-        res_obj = None
-
-        # iterate atoms exactly in original file order
-        for a in self.atoms:
-            chain_id = (a.chain or " ").strip()
-            res_id = (a.resname, chain_id, int(a.resnum))
-
-            # start new chain when chain_id changes w.r.t. previous atom
-            if chain_id != prev_chain_id:
-                chain_obj = top.add_chain()
-                prev_chain_id = chain_id
-                prev_res_id = None  # force creating a residue on first atom of the chain
-
-            # start new residue when residue triple changes
-            if res_id != prev_res_id:
-                try:
-                    res_obj = top.add_residue(a.resname, chain_obj, resSeq=int(a.resnum))
-                except TypeError:
-                    res_obj = top.add_residue(a.resname, chain_obj)
-                residue_keys.append((chain_id, int(a.resnum), a.resname))
-                prev_res_id = res_id
-
-            # element mapping (default to carbon if unknown)
-            sym = (getattr(a, "element", "") or "").upper()
-            el = md.element.get_by_symbol(sym) or md.element.carbon
-
-            top.add_atom(a.name, el, res_obj)
-            coords_nm.append((a.x / 10.0, a.y / 10.0, a.z / 10.0))  # Å -> nm
+    def mdtraj_trajectory(self):
+        top = md.Topology.from_openmm(self.topology())
+        coords_nm = [(a.x / 10.0, a.y / 10.0, a.z / 10.0) for a in self.atoms]  # Å -> nm
 
         if not coords_nm:
             traj = md.Trajectory(xyz=np.zeros((1, 0, 3), dtype=float), topology=top)
-            return traj, residue_keys
+            return traj
 
         xyz = np.array([coords_nm], dtype=np.float32)  # (1, natoms, 3) nm
         traj = md.Trajectory(xyz=xyz, topology=top)
-        return traj, residue_keys
+        return traj
 
     def sasa_by_residue(
         self,
@@ -254,7 +225,7 @@ class Model:
         if radii.lower() != "bondi":
             raise ValueError("Only 'bondi' radii are supported with the MDTraj backend.")
 
-        traj, res_keys = self._to_mdtraj()
+        traj = self.mdtraj_trajectory()
         if traj.n_atoms == 0:
             return {}
 
@@ -289,9 +260,12 @@ class Structure:
             raise ValueError("Structure has no models")
         return self.models[0]
 
-    def openmm_positions(self, model_index: int = 0):
+    def positions(self, model_index: int = 0):
         """Positions for the selected model as Quantity[list[Vec3]] in nm."""
-        return self.models[model_index].openmm_positions()
+        return self.models[model_index].positions()
+
+    def topology(self):
+        return self.models[0].topology()
 
     def select_CA(self) -> Structure:
         """Apply CA selection to each model; return a new Structure."""
