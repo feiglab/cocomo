@@ -6,13 +6,14 @@ import re
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional, Union
 
 import mdtraj as md
 import numpy as np
 from openmm import Vec3, unit
 from openmm.app import Topology, element
 
-Number = int | float
+FileLike = Union[str, Path, io.BytesIO, io.StringIO]
 
 # --- Data containers ---------------------------------------------------------
 
@@ -50,8 +51,8 @@ class Residue:
 class Chain:
     key_id: str  # key used in Structure.models[...].chains
     residues: list[Residue] = field(default_factory=list)
-    seg_id: str | None = None  # segment ID if grouping by seg
-    chain_id: str | None = None  # chain ID from PDB
+    seg_id: Optional[str] = None  # segment ID if grouping by seg
+    chain_id: Optional[str] = None  # chain ID from PDB
 
     def __repr__(self) -> str:
         return f"<chain {self.key_id} : segment {self.seg_id} chain {self.chain_id}>"
@@ -70,13 +71,13 @@ class Model:
     def iter_residues(self) -> Iterator[Residue]:
         for c in self.chain.values():
             for r in c.residues:
-                yield from r
+                yield from c.residues
 
     def iter_atoms(self) -> Iterator[Atom]:
         for c in self.chain.values():
             for r in c.residues:
                 for a in r.atoms:
-                    yield from a
+                    yield from r.atoms
 
     def __repr__(self) -> str:
         n_chains = len(self.chain)
@@ -146,7 +147,7 @@ class Model:
         return m2
 
     @staticmethod
-    def _flatten_indices(indices: list[int] | list[list[int]]) -> list[int]:
+    def _flatten_indices(indices: Union[list[int], list[list[int]]]) -> list[int]:
         if not indices:
             return []
         if isinstance(indices[0], (list, tuple)):
@@ -156,7 +157,7 @@ class Model:
             return out
         return [int(i) for i in indices]  # type: ignore[return-value]
 
-    def select_byindex(self, indices: list[int] | list[list[int]]) -> Model:
+    def select_byindex(self, indices: Union[list[int], list[list[int]]]) -> Model:
         """
         Return a new Model containing only atoms at the given 0-based indices
         (per this model's atom order). Accepts a flat list or list-of-lists.
@@ -212,7 +213,7 @@ class Model:
         probe_radius: float = 0.14,
         n_sphere_points: int = 960,
         radii: str = "bondi",
-    ) -> dict[tuple[str, int, str], float]:
+    ) -> list[float]:
         """
         Fast SASA (nm^2) per residue using MDTraj Shrake–Rupley with Bondi radii.
         Parameters
@@ -244,7 +245,7 @@ class Model:
 class Structure:
     models: list[Model] = field(default_factory=list)
 
-    def __getitem__(self, idx: int | slice) -> Model | list[Model]:
+    def __getitem__(self, idx: Union[int, slice]) -> Union[Model, list[Model]]:
         return self.models[idx]
 
     def __len__(self) -> int:
@@ -276,7 +277,7 @@ class Structure:
             out.models.append(Model(model_id=1))
         return out
 
-    def select_byindex(self, indices: list[int] | list[list[int]]) -> Structure:
+    def select_byindex(self, indices: Union[list[int], list[list[int]]]) -> Structure:
         """
         Apply the same index selection to each model; return a new Structure.
         Indices are interpreted per-model (0-based within each model).
@@ -307,7 +308,7 @@ class Structure:
         probe_radius: float = 0.14,
         n_sphere_points: int = 960,
         radii: str = "bondi",
-    ) -> dict[tuple[str, int, str], float]:
+    ) -> list[float]:
         """
         Compute SASA (nm^2) by residue for a chosen model (default 0) via MDTraj.
         """
@@ -334,13 +335,13 @@ class PDBReader:
       automatic suffixing (A, A1, A2, ...) when non-contiguous repeats occur.
     """
 
-    def __new__(cls, file: str | (Path, io.BytesIO, io.StringIO) | None = None):
+    def __new__(cls, file: Optional[FileLike] = None):
         self = super().__new__(cls)
         if file is None:
             return self
         return cls._read_direct(file)
 
-    def read(self, file: str | (Path, io.BytesIO, io.StringIO)) -> Structure:
+    def read(self, file: FileLike) -> Structure:
         text_iter = self._open_text(file)
         return self._parse(text_iter)
 
@@ -350,7 +351,7 @@ class PDBReader:
     # -- internals --
 
     @staticmethod
-    def _open_text(file: str | (Path, io.BytesIO, io.StringIO)) -> Iterable[str]:
+    def _open_text(file: FileLike) -> Iterable[str]:
         if isinstance(file, (io.StringIO, io.BytesIO)):
             if isinstance(file, io.BytesIO):
                 return io.TextIOWrapper(file, encoding="utf-8", newline="").read().splitlines()
@@ -363,18 +364,18 @@ class PDBReader:
             return fh.read().splitlines()
 
     @classmethod
-    def _read_direct(cls, file: str | (Path, io.BytesIO, io.StringIO)) -> Structure:
+    def _read_direct(cls, file: FileLike) -> Structure:
         return cls._parse(cls._open_text(file))
 
     @staticmethod
     def _parse(lines: Iterable[str]) -> Structure:
         s = Structure()
-        current_model: Model | None = None
+        current_model: Optional[Model] = None
 
         # State for allocating fallback chain keys when SEGID is absent
         # counts['A'] -> how many extra chains created beyond the first contiguous block
         fallback_counts: dict[str, int] = {}
-        last_chain_id_seen: str | None = None  # last PDB chain ID encountered (for contiguity)
+        last_chain_id_seen: Optional[str] = None  # last PDB chain ID encountered (for contiguity)
 
         def alloc_chain_key(atom: Atom) -> str:
             """Return chain key for this atom per rules."""
@@ -553,7 +554,7 @@ def _parse_atom_line(line: str) -> Atom:
     )
 
 
-def _safe_int(s: str, default: int | None = None, required: bool = False) -> int | None:
+def _safe_int(s: str, default: Optional[int] = None, required: bool = False) -> Optional[int]:
     try:
         return int(s.strip())
     except Exception:
@@ -562,7 +563,7 @@ def _safe_int(s: str, default: int | None = None, required: bool = False) -> int
         return default
 
 
-def _safe_float(s: str, default: float | None = None, required: bool = False) -> float | None:
+def _safe_float(s: str, default: Optional[float] = None, required: bool = False) -> Optional[float]:
     try:
         return float(s.strip())
     except Exception:
@@ -634,7 +635,7 @@ class ResidueSelector:
 class Term:
     """One selection term: chains (or None for all chains) + residue selector (or all)."""
 
-    chains: tuple[str, ...] | None  # None => all chains
+    chains: Optional[tuple[str, ...]]  # None => all chains
     residues: ResidueSelector
 
 
@@ -685,7 +686,9 @@ class DomainSelector:
         self._terms = self._parse(spec)
         self._has_explicit_chains = any(t.chains is not None for t in self._terms)
 
-    def atom_lists(self, structure: Structure | Model, model_index: int = 0) -> list[list[int]]:
+    def atom_lists(
+        self, structure: Union[Structure, Model], model_index: int = 0
+    ) -> list[list[int]]:
         """
         Return one or more atom lists (each sorted, 0-based indices into Model.atoms)
         according to the spec aggregation rule described in the class docstring.
@@ -730,7 +733,7 @@ class DomainSelector:
             lists.append(sorted(out))
         return lists
 
-    def atom_indices(self, structure: Structure | Model, model_index: int = 0) -> list[int]:
+    def atom_indices(self, structure: Union[Structure, Model], model_index: int = 0) -> list[int]:
         """Flattened union of all lists returned by atom_lists()."""
         lists = self.atom_lists(structure, model_index=model_index)
         merged: set[int] = set()

@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@v4
@@ -34,7 +34,7 @@ jobs:
 
       - name: Lint (Ruff) and format check (Black)
         run: |
-          ruff check src tests
+          ruff check --ignore UP007,UP045 src tests
           black --check src tests
 
       - name: Run tests (pytest via the same interpreter)
