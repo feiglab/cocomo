@@ -42,7 +42,6 @@ class ResPar:
     azero: float
     surface: float
 
-
 @dataclass(frozen=True)
 class ResidueParameters(Mapping[str, ResPar]):
     residues: Mapping[str, ResPar]
@@ -63,7 +62,6 @@ class ResidueParameters(Mapping[str, ResPar]):
 
     def get(self, key: str, default=None):
         return self.residues.get(key, default)
-
 
 # --- Parameters ---------------------------------------------------------
 
