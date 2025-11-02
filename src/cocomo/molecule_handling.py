@@ -13,9 +13,10 @@ import numpy as np
 from openmm import Vec3, unit
 from openmm.app import Topology, element
 
-FileLike = Union[str, Path, io.BytesIO, io.StringIO] 
+FileLike = Union[str, Path, io.BytesIO, io.StringIO]
 
 # --- Data containers ---------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class Atom:
@@ -146,7 +147,7 @@ class Model:
         return m2
 
     @staticmethod
-    def _flatten_indices(indices: Union[list[int],list[list[int]]]) -> list[int]:
+    def _flatten_indices(indices: Union[list[int], list[list[int]]]) -> list[int]:
         if not indices:
             return []
         if isinstance(indices[0], (list, tuple)):
@@ -244,7 +245,7 @@ class Model:
 class Structure:
     models: list[Model] = field(default_factory=list)
 
-    def __getitem__(self, idx: Union[int, slice]) -> Union[Model,list[Model]]:
+    def __getitem__(self, idx: Union[int, slice]) -> Union[Model, list[Model]]:
         return self.models[idx]
 
     def __len__(self) -> int:
@@ -685,8 +686,9 @@ class DomainSelector:
         self._terms = self._parse(spec)
         self._has_explicit_chains = any(t.chains is not None for t in self._terms)
 
-    def atom_lists(self, structure: Union[Structure, Model], 
-                         model_index: int = 0) -> list[list[int]]:
+    def atom_lists(
+        self, structure: Union[Structure, Model], model_index: int = 0
+    ) -> list[list[int]]:
         """
         Return one or more atom lists (each sorted, 0-based indices into Model.atoms)
         according to the spec aggregation rule described in the class docstring.
@@ -731,7 +733,7 @@ class DomainSelector:
             lists.append(sorted(out))
         return lists
 
-    def atom_indices(self, structure: Union[Structure,Model], model_index: int = 0) -> list[int]:
+    def atom_indices(self, structure: Union[Structure, Model], model_index: int = 0) -> list[int]:
         """Flattened union of all lists returned by atom_lists()."""
         lists = self.atom_lists(structure, model_index=model_index)
         merged: set[int] = set()
