@@ -44,6 +44,7 @@ line-length = 100
 target-version = "py39"
 select = ["E","F","I","UP"]
 src = ["src"]
+ignore = ["UP007", "UP045"]
 
 [tool.ruff.lint]
 ignore = ["UP007", "UP045"]
