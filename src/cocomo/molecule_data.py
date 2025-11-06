@@ -80,12 +80,21 @@ class Model:
                     yield from r.atoms
 
     def __repr__(self) -> str:
-        n_chains = len(self.chain)
-        n_res = sum(len(c.residues) for c in self.chain.values())
-        n_atoms = len(self.atoms)
+        n_chains = self.nchains()
+        n_res = self.nresidues()
+        n_atoms = self.natoms()
         return f"<{n_chains} chains, {n_res} residues, {n_atoms} atoms>"
 
     __str__ = __repr__
+
+    def nchains(self):
+        return len(self.chain)
+
+    def nresidues(self):
+        return sum(len(c.residues) for c in self.chain.values())
+
+    def natoms(self):
+        return len(self.atoms)
 
     def positions(self):
         """
@@ -260,6 +269,15 @@ class Structure:
         if not self.models:
             raise ValueError("Structure has no models")
         return self.models[0]
+
+    def nchains(self) -> int:
+        return self.models[0].nchains()
+
+    def nresidues(self) -> int:
+        return self.models[0].nresidues()
+
+    def natoms(self) -> int:
+        return self.models[0].natoms()
 
     def positions(self, model_index: int = 0):
         """Positions for the selected model as Quantity[list[Vec3]] in nm."""

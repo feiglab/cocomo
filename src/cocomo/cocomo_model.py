@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from itertools import combinations
 from math import copysign, sqrt
 from types import MappingProxyType
 
+import numpy as np
 from openmm import (
     CMMotionRemover,
+    CustomBondForce,
     CustomNonbondedForce,
     HarmonicAngleForce,
     HarmonicBondForce,
@@ -17,7 +20,11 @@ from openmm import (
     Vec3,
     XmlSerializer,
 )
-from openmm.app import Simulation
+from openmm.app import (
+    DCDReporter,
+    Simulation,
+    StateDataReporter,
+)
 from openmm.unit import (
     Quantity,
     amu,
@@ -26,6 +33,7 @@ from openmm.unit import (
     kilojoule,
     mole,
     nanometer,
+    norm,
     picoseconds,
     radian,
 )
@@ -41,6 +49,12 @@ class ResPar:
     epsilon: float
     azero: float
     surface: float
+
+    def surface_scale(self, area: float, surfscale: float = 1.0) -> float:
+        if self.surface > 0.0001 and surfscale > 0.0001:
+            return min(area / self.surface / surfscale, 1.0)
+        else:
+            return 1.0
 
 
 @dataclass(frozen=True)
@@ -106,11 +120,11 @@ RESIDUE_PARAMS_V1 = ResidueParameters(
     }
 )
 
-epsilon_pol_v2 = 0.176
-epsilon_hp_v2 = 0.295
+epsilon_pol_v2 = 0.17596101
+epsilon_hp_v2 = 0.29519131
 
 azero_pol_v2 = 0.00
-azero_hp_v2 = 0.0002
+azero_hp_v2 = 0.000245894
 
 RESIDUE_PARAMS_V2 = ResidueParameters(
     residues={
@@ -173,6 +187,8 @@ EPS_V2 = {
     "pipi_propro": eps_pipi_propro_v2,
 }
 
+surf_scale_v2 = 0.7
+
 # --- Other useful data -------------------------------------------------------
 
 aminoacids = [
@@ -211,24 +227,25 @@ class COCOMO:
         topology=None,
         *,
         version=None,
-        box=100,
-        cuton=2.9,
-        cutoff=3.1,
-        switching="original",
-        kappa=1.0,
+        box=100,  # 100 or (50,20,40), nm
+        cuton=2.9,  # nm
+        cutoff=3.1,  # nm
+        switching="original",  # 'original', 'openmm', or None
+        kappa=1.0,  # nm
+        domains=None,  # turns on ENM
+        enmforce=500.0,  # 1/nm**2
+        enmcutoff=0.9,  # nm
+        sasa=None,  # for surface scaling
+        positions=None,  # needed for ENM
         removecmmotion=True,
         xml=None,
     ):
-        # box: 100 or (50,20,40), in nanometers
-        # switching: 'original', 'openmm', or None
-        # cuton/cutoff: in nanometers
-        # kappa: in nanometers
+
+        self.simulation = None
 
         self.topology = topology
 
-        if xml is not None:
-            self.read_system(xml)
-            return
+        self.set_sasa(sasa)
 
         self.version = 2 if version is None else version
         self.set_params(self.version)
@@ -238,6 +255,16 @@ class COCOMO:
         self.cuton = cuton * nanometer
         self.cutoff = cutoff * nanometer
         self.switching = switching
+
+        self.set_domains(domains)
+        self.enmforce = enmforce / nanometer**2
+        self.enmcutoff = enmcutoff * nanometer
+
+        self.set_positions(positions)
+
+        if xml is not None:
+            self.read_system(xml)
+            return
 
         self.system = System()
         self.setup_particles()
@@ -255,7 +282,91 @@ class COCOMO:
         with open(fname) as file:
             self.system = XmlSerializer.deserialize(file.read())
 
-    def setup_simulation(self, *, temp=298, gamma=0.01, tstep=0.01, resources="CPU") -> None:
+    def write_state(self, fname="state.xml"):
+        if self.simulation is not None:
+            self.simulation.saveState(fname)
+
+    def read_state(self, fname="state.xml"):
+        if self.simulation is not None:
+            self.simulation.loadState(fname)
+
+    def get_potentialEnergy(self):
+        if self.simulation is not None:
+            return self.simulation.context.getState(getEnergy=True).getPotentialEnergy()
+        else:
+            return 0.0
+
+    def get_energies(self):
+        energies = {}
+        for i, frc in enumerate(self.system.getForces()):
+            g = frc.getForceGroup()
+            e = self._group_energy(self.simulation.context, g)
+            name = frc.getName()
+            if not name:
+                name = frc.__class__.__name__
+            energies[f"{name}"] = e
+        return energies
+
+    def set_velocities(self, *, seed=None, newtemp=None):
+        if self.simulation is not None:
+            if newtemp is not None:
+                temperature = newtemp * kelvin
+            else:
+                temperature = self.temperature
+            if seed is None:
+                seed = np.random.SeedSequence().entropy
+            seed = int(seed) & 0x7FFFFFFF
+            self.simulation.context.setVelocitiesToTemperature(temperature, seed)
+
+    def minimize(self, *, nstep=1000, tol=0.001):
+        if self.simulation is not None:
+            tolerance = tol * kilojoule / (nanometer * mole)
+            self.simulation.minimizeEnergy(tolerance=tolerance, maxIterations=nstep)
+
+    def simulate(self, *, nstep=1000, nout=100, logfile="energy.log", dcdfile="traj.dcd"):
+        if self.simulation is not None:
+            dcd = DCDReporter(dcdfile, nout)
+            self.simulation.reporters.append(dcd)
+            log = StateDataReporter(
+                logfile,
+                nout,
+                step=True,
+                time=True,
+                potentialEnergy=True,
+                kineticEnergy=True,
+                totalEnergy=True,
+                temperature=True,
+                volume=True,
+                progress=True,
+                remainingTime=True,
+                speed=True,
+                totalSteps=nstep,
+                separator=" ",
+            )
+            self.simulation.reporters.append(log)
+            self.simulation.step(nstep)
+
+    def set_sasa(self, sasa=None):
+        if self.topology is not None:
+            natoms = self.topology.getNumAtoms()
+            if natoms > 0:
+                self.sasa = np.ones(natoms) * 9999.0
+                if sasa is not None:
+                    if len(sasa) != natoms:
+                        raise ValueError("Length of SASA array does not match atoms")
+                    else:
+                        for i in range(len(sasa)):
+                            self.sasa[i] = sasa[i]
+
+    def set_domains(self, domains):
+        if domains is not None:
+            self.domains = [row.copy() for row in domains]
+        else:
+            self.domains = None
+
+    def setup_simulation(
+        self, *, temperature=298, gamma=0.01, tstep=0.01, resources="CPU", restart=None
+    ) -> None:
         # temperature: in K
         # tstep: in ps
         # gamma: in 1/ps
@@ -264,7 +375,7 @@ class COCOMO:
         assert self.topology is not None, "need topology to be defined"
         assert self.system is not None, "need openMM system object to be defined"
 
-        self.temperature = temp * kelvin
+        self.temperature = temperature * kelvin
         self.tstep = tstep * picoseconds
         self.gamma = gamma / picoseconds
         self.resources = resources
@@ -279,11 +390,14 @@ class COCOMO:
             )
         if self.resources == "CPU":
             self.simulation = Simulation(self.topology, self.system, self.integrator, self.platform)
+        if restart is not None:
+            self.read_state(restart)
+        elif self.positions is not None:
+            self.simulation.context.setPositions(self.positions)
 
-    def set_positions(self, positions=None) -> None:
-        assert self.simulation is not None, "need simulation to be defined"
-
-        if positions is not None:
+    def set_positions(self, positions) -> None:
+        self.positions = positions
+        if self.simulation is not None:
             self.simulation.context.setPositions(positions)
 
     def setup_particles(self) -> None:
@@ -317,6 +431,8 @@ class COCOMO:
             self.setupAngleForce()
             self.setupLongRangeForce()
             self.setupShortRangeForce()
+            if self.domains is not None and self.positions is not None:
+                self.setupENMForce()
             if self.removecmmotion:
                 self.setupCMMotionRemover()
             self.forcemapping = self.assign_force_groups()
@@ -396,23 +512,30 @@ class COCOMO:
                 self.set_params(self.version)
             if self.switching == "original":
                 equation = "select( step(r_on-r), longrange+sdel, switch ); "
-                equation += "longrange = (A+Z)*exp(-r/K0)/r; "
-                equation += "sdel = sk*((1/r_on)^3-1/(r_off)^3)^2 - (A+Z)/r_on*exp(-r_on/K0); "
+                equation += "longrange = (AZ)*exp(-r/K0)/r; "
+                equation += "sdel = sk*((1/r_on)^3-1/(r_off)^3)^2 - (AZ)/r_on*exp(-r_on/K0); "
                 equation += "switch = sk*((1/r)^3-1/(r_off)^3)^2; "
                 equation += "sk = -longrange_deriv_Ron/switch_deriv_Ron; "
-                equation += "longrange_deriv_Ron = -1*(A+Z)*exp(-r_on/K0)/r_on*(1/K0+1/r_on); "
+                equation += "longrange_deriv_Ron = -1*(AZ)*exp(-r_on/K0)/r_on*(1/K0+1/r_on); "
                 equation += "switch_deriv_Ron = 6*(1/r_on^3-1/r_off^3)*1/r_on^4; "
-                equation += "A=A1*A2; "
-                equation += "Z=Z1+Z2 "
             else:
-                equation = "(A+Z)/r*exp(-r/K0); "
-                equation += "A=A1*A2; "
-                equation += "Z=Z1+Z2"
+                equation = "(AZ)/r*exp(-r/K0); "
+
+            if self.surfscale is not None:
+                equation += "AZ=S*(A+Z); "
+                equation += "S=(S1*S2)^0.5; "
+            else:
+                equation += "AZ=A+Z; "
+
+            equation += "A=A1*A2; "
+            equation += "Z=Z1+Z2 "
 
             force = CustomNonbondedForce(equation)
             force.addGlobalParameter("K0", self.k0)
             force.addPerParticleParameter("A")
             force.addPerParticleParameter("Z")
+            if self.surfscale is not None:
+                force.addPerParticleParameter("S")
             force.setNonbondedMethod(CustomNonbondedForce.CutoffPeriodic)
             force.setCutoffDistance(self.cutoff)
             if self.switching == "original":
@@ -422,11 +545,15 @@ class COCOMO:
                 force.setUseSwitchingFunction(True)
                 force.setSwitchingDistance(self.cuton)
 
-            for atom in self.topology.atoms():
+            for i, atom in enumerate(self.topology.atoms()):
                 chg = self.params[atom.residue.name].charge
                 a = copysign(sqrt(0.75 * abs(chg)), chg) * nanometer * kilojoule / mole
                 a0 = self.params[atom.residue.name].azero * (nanometer * kilojoule / mole) ** 0.5
-                force.addParticle([a, a0])
+                if self.surfscale is not None:
+                    s = self.params[atom.residue.name].surface_scale(self.sasa[i], self.surfscale)
+                    force.addParticle([a, a0, s])
+                else:
+                    force.addParticle([a, a0])
 
             if self.topology.getNumBonds() == 0:
                 self.set_bonds()
@@ -444,21 +571,29 @@ class COCOMO:
 
             if self.switching == "original":
                 equation = "select( step(r_on-r), shortrange+sdel, switch ); "
-                equation += "shortrange = 4*eps_eff*((sigma/r)^10-(sigma/r)^5); "
+                equation += "shortrange = 4*eps*((sigma/r)^10-(sigma/r)^5); "
                 equation += "sdel = sk*((1/r_on)^3-1/(r_off)^3)^2 "
-                equation += " - 4*eps_eff*((sigma/r_on)^10-(sigma/r_on)^5); "
+                equation += " - 4*eps*((sigma/r_on)^10-(sigma/r_on)^5); "
                 equation += "switch = sk*((1/r)^3-1/(r_off)^3)^2; "
                 equation += "sk = -shortrange_deriv_Ron/switch_deriv_Ron; "
-                equation += "shortrange_deriv_Ron = 4*eps_eff*(-10*(sigma/r_on)^11"
+                equation += "shortrange_deriv_Ron = 4*eps*(-10*(sigma/r_on)^11"
                 equation += "*1/r_on+5*(sigma/r_on)^5*1/r_on ); "
                 equation += "switch_deriv_Ron = 6*(1/r_on^3-1/r_off^3)*1/r_on^4;"
             else:
-                equation = "4*eps_eff*((sigma/r)^10-(sigma/r)^5);"
+                equation = "4*eps*((sigma/r)^10-(sigma/r)^5);"
+
             equation += "sigma=0.5*(sigma1+sigma2);"
-            equation += "eps_eff = eps_mix"
-            equation += "+ eps_catpi_pro*min(1,catpipropair) "
-            equation += "+ eps_catpi_na*min(1,catpinapair) "
-            equation += "+ eps_pipi*min(1,catpipipair);"
+            if self.surfscale is not None:
+                equation += "eps = S*(eps_mix"
+                equation += "+ eps_catpi_pro*min(1,catpipropair) "
+                equation += "+ eps_catpi_na*min(1,catpinapair) "
+                equation += "+ eps_pipi*min(1,catpipipair)); "
+                equation += "S=(S1*S2)^0.5; "
+            else:
+                equation += "eps = eps_mix"
+                equation += "+ eps_catpi_pro*min(1,catpipropair) "
+                equation += "+ eps_catpi_na*min(1,catpinapair) "
+                equation += "+ eps_pipi*min(1,catpipipair); "
             equation += "catpipropair=isCation1*isAromatic2 + isCation2*isAromatic1;"
             equation += "catpinapair=isCation1*isNucleic2 + isCation2*isNucleic1;"
             equation += "catpipipair=isAromatic1*isAromatic2 + isAromatic2*isAromatic1;"
@@ -470,6 +605,9 @@ class COCOMO:
             force.addPerParticleParameter("isCation")
             force.addPerParticleParameter("isAromatic")
             force.addPerParticleParameter("isNucleic")
+            if self.surfscale is not None:
+                force.addPerParticleParameter("S")
+
             force.addGlobalParameter("eps_catpi_pro", self.eps["catpi_propro"] * kilojoule / mole)
             force.addGlobalParameter("eps_catpi_na", self.eps["catpi_prona"] * kilojoule / mole)
             force.addGlobalParameter("eps_pipi", self.eps["pipi_propro"] * kilojoule / mole)
@@ -483,13 +621,17 @@ class COCOMO:
                 force.setUseSwitchingFunction(True)
                 force.setSwitchingDistance(self.cuton)
 
-            for atom in self.topology.atoms():
+            for i, atom in enumerate(self.topology.atoms()):
                 sigma = self.params[atom.residue.name].radius * 2 * 2 ** (-1 / 6) * nanometer
                 epsilon = self.params[atom.residue.name].epsilon * kilojoule / mole
                 isCation = 1.0 if atom.residue.name in ["ARG", "LYS"] else 0.0
                 isAromatic = 1.0 if atom.residue.name in ["PHE", "TRP", "TYR"] else 0.0
                 isNucleic = 1.0 if atom.residue.name in nucleicacids else 0.0
-                force.addParticle([sigma, epsilon, isCation, isAromatic, isNucleic])
+                if self.surfscale is not None:
+                    s = self.params[atom.residue.name].surface_scale(self.sasa[i], self.surfscale)
+                    force.addParticle([sigma, epsilon, isCation, isAromatic, isNucleic, s])
+                else:
+                    force.addParticle([sigma, epsilon, isCation, isAromatic, isNucleic])
 
             if self.topology.getNumBonds() == 0:
                 self.set_bonds()
@@ -498,6 +640,32 @@ class COCOMO:
 
             force.setName("shortrange")
             self.forces["shortrange"] = force
+            self.system.addForce(force)
+
+    def setupENMForce(self) -> None:
+        if self.topology is not None and self.domains is not None and self.positions is not None:
+            equation = "0.5*k*(r-r0)^2"
+            force = CustomBondForce(equation)
+            force.addGlobalParameter("k", self.enmforce)
+            force.addPerBondParameter("r0")
+
+            atm = list(self.topology.atoms())
+            res = np.fromiter((a.residue.index for a in atm), dtype=np.int32)
+            chain = np.fromiter((id(a.residue.chain) for a in atm), dtype=np.int64)
+
+            for d in self.domains:
+                idx = np.array(sorted(set(d)), dtype=np.int32)
+                if idx.size < 2:
+                    continue
+                for i, j in combinations(idx, 2):
+                    if (abs(res[i] - res[j]) <= 2) and (chain[i] == chain[j]):
+                        continue
+                    distance = norm(self.positions[i] - self.positions[j])
+                    if distance < self.enmcutoff:
+                        force.addBond(i, j, [distance])
+
+            force.setName("enm")
+            self.forces["enm"] = force
             self.system.addForce(force)
 
     def setupCMMotionRemover(self) -> None:
@@ -523,30 +691,17 @@ class COCOMO:
         st: State = context.getState(getEnergy=True, groups=mask)
         return st.getPotentialEnergy()
 
-    def get_energies(self):
-        energies = {}
-        for i, frc in enumerate(self.system.getForces()):
-            g = frc.getForceGroup()
-            e = self._group_energy(self.simulation.context, g)
-            name = frc.getName()
-            if not name:
-                name = frc.__class__.__name__
-            energies[f"{i}:{name}"] = e
-        return energies
-
     def set_params(self, version=None):
+        # default is version 2
+        self.params = RESIDUE_PARAMS_V2
+        self.eps = EPS_V2
+        self.surfscale = surf_scale_v2
         if version is None:
-            self.params = RESIDUE_PARAMS_V2
-            self.eps = EPS_V2
+            return
         if version == 1:
             self.params = RESIDUE_PARAMS_V1
             self.eps = EPS_V1
-        elif version == 2:
-            self.params = RESIDUE_PARAMS_V2
-            self.eps = EPS_V2
-        else:
-            self.params = RESIDUE_PARAMS_V2
-            self.eps = EPS_V2
+            self.surfscale = None
 
     def set_bonds(self):
         if self.topology is not None:

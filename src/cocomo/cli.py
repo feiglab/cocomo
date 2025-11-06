@@ -4,7 +4,7 @@ import argparse
 import json
 
 from .__version__ import __version__
-from .cocomo_system import COCOMO
+from .cocomo_model import COCOMO
 
 
 def build_parser() -> argparse.ArgumentParser:
