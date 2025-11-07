@@ -232,11 +232,12 @@ class COCOMO:
         cutoff=3.1,  # nm
         switching="original",  # 'original', 'openmm', or None
         kappa=1.0,  # nm
+        sasa=None,  # for surface scaling
+        enmpairs=None,  # list of ENM pairs
         domains=None,  # turns on ENM
+        positions=None,  # needed for ENM
         enmforce=500.0,  # 1/nm**2
         enmcutoff=0.9,  # nm
-        sasa=None,  # for surface scaling
-        positions=None,  # needed for ENM
         removecmmotion=True,
         xml=None,
     ):
@@ -256,11 +257,15 @@ class COCOMO:
         self.cutoff = cutoff * nanometer
         self.switching = switching
 
+        self.set_positions(positions)
         self.set_domains(domains)
+
         self.enmforce = enmforce / nanometer**2
         self.enmcutoff = enmcutoff * nanometer
-
-        self.set_positions(positions)
+        if enmpairs is None:
+            self.enmpairs = self._findENMPairs()
+        else:
+            self.enmpairs = enmpairs
 
         if xml is not None:
             self.read_system(xml)
@@ -365,7 +370,14 @@ class COCOMO:
             self.domains = None
 
     def setup_simulation(
-        self, *, temperature=298, gamma=0.01, tstep=0.01, resources="CPU", restart=None
+        self,
+        *,
+        temperature=298,
+        gamma=0.01,
+        tstep=0.01,
+        resources="CPU",
+        positions=None,
+        restart=None,
     ) -> None:
         # temperature: in K
         # tstep: in ps
@@ -392,8 +404,11 @@ class COCOMO:
             self.simulation = Simulation(self.topology, self.system, self.integrator, self.platform)
         if restart is not None:
             self.read_state(restart)
-        elif self.positions is not None:
-            self.simulation.context.setPositions(self.positions)
+        else:
+            if positions is not None:
+                self.set_positions(positions)
+            if self.positions is not None:
+                self.simulation.context.setPositions(self.positions)
 
     def set_positions(self, positions) -> None:
         self.positions = positions
@@ -642,27 +657,43 @@ class COCOMO:
             self.forces["shortrange"] = force
             self.system.addForce(force)
 
-    def setupENMForce(self) -> None:
-        if self.topology is not None and self.domains is not None and self.positions is not None:
-            equation = "0.5*k*(r-r0)^2"
-            force = CustomBondForce(equation)
-            force.addGlobalParameter("k", self.enmforce)
-            force.addPerBondParameter("r0")
+    def _findENMPairs(self) -> list[int, int, float]:
+        if self.topology is None:
+            return None
 
-            atm = list(self.topology.atoms())
-            res = np.fromiter((a.residue.index for a in atm), dtype=np.int32)
-            chain = np.fromiter((id(a.residue.chain) for a in atm), dtype=np.int64)
+        if self.domains is None or self.positions is None:
+            return None
 
-            for d in self.domains:
-                idx = np.array(sorted(set(d)), dtype=np.int32)
-                if idx.size < 2:
+        pairs = []
+        atm = list(self.topology.atoms())
+        res = np.fromiter((a.residue.index for a in atm), dtype=np.int32)
+        chain = np.fromiter((id(a.residue.chain) for a in atm), dtype=np.int64)
+
+        for d in self.domains:
+            idx = np.array(sorted(set(d)), dtype=np.int32)
+            if idx.size < 2:
+                continue
+            for i, j in combinations(idx, 2):
+                if (abs(res[i] - res[j]) <= 2) and (chain[i] == chain[j]):
                     continue
-                for i, j in combinations(idx, 2):
-                    if (abs(res[i] - res[j]) <= 2) and (chain[i] == chain[j]):
-                        continue
-                    distance = norm(self.positions[i] - self.positions[j])
-                    if distance < self.enmcutoff:
-                        force.addBond(i, j, [distance])
+                distance = norm(self.positions[i] - self.positions[j])
+                if distance < self.enmcutoff:
+                    pairs.append([i, j, distance])
+        return pairs
+
+    def setupENMForce(self) -> None:
+        if self.topology is not None:
+            if self.enmpairs is None:
+                self.enmpairs = self._findENMPairs()
+
+            if self.enmpairs is not None and len(self.enmpairs) > 0:
+                equation = "0.5*k*(r-r0)^2"
+                force = CustomBondForce(equation)
+                force.addGlobalParameter("k", self.enmforce)
+                force.addPerBondParameter("r0")
+
+                for enm in self.enmpairs:
+                    force.addBond(enm[0], enm[1], [enm[2]])
 
             force.setName("enm")
             self.forces["enm"] = force
