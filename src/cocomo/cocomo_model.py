@@ -446,8 +446,7 @@ class COCOMO:
             self.setupAngleForce()
             self.setupLongRangeForce()
             self.setupShortRangeForce()
-            if self.domains is not None and self.positions is not None:
-                self.setupENMForce()
+            self.setupENMForce()
             if self.removecmmotion:
                 self.setupCMMotionRemover()
             self.forcemapping = self.assign_force_groups()
