@@ -11,6 +11,8 @@ from .system_handling import (
     Assembly,
     Component,
     ComponentType,
+    Interaction,
+    InteractionSet,
 )
 
 __all__ = [
@@ -20,6 +22,8 @@ __all__ = [
     "ComponentType",
     "COCOMO",
     "DomainSelector",
+    "Interaction",
+    "InteractionSet",
     "Model",
     "PDBReader",
     "SelectionError",

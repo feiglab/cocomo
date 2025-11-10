@@ -680,76 +680,82 @@ class DomainSelector:
     Parse domain spec strings and produce atom lists from your Structure/Model.
 
     Semantics:
-      • If ANY term specifies chains => return ONE atom list pooled over those chains/terms.
-      • If NO term specifies chains  => return ONE atom list PER CHAIN (same residue spec applied).
+      • If input is a single string: commas and/or whitespace separate terms that are
+        COMBINED into one selection (one atom list if any explicit chains are present).
+        Example: "A:2-10,B:5-15" -> one combined list over A:2-10 and B:5-15.
+      • If input is a list/tuple of strings: each element is a GROUP; each group yields
+        its own atom list(s). Example: ["A:2-10", "B:2-10"] -> two separate lists.
 
-    Grammar (forgiving):
-      - Terms separated by whitespace.
+      • Inside a group:
+          – If ANY term specifies chains => return ONE atom list pooled across those chains.
+          – If NO term specifies chains  => return ONE atom list PER CHAIN (same residue spec).
+
+    Grammar (per term, forgiving):
       - Chain lists use ':' (e.g., 'H271:H272').
-      - Chain vs residues separated by first '.' (e.g., 'H271.2-91.93-94' or 'H271.all').
+      - Chain vs residues separated by first '.' (e.g., 'H271.2-91' or 'H271.all').
       - If only residues are given (e.g., '2-91.93-94'), they apply to all chains.
       - 'all' alone => all chains, all residues.
-      - After a chain list, residue ranges may be split by '.' or ':'; both accepted.
-      - Mixed terms allowed: 'H271.2-91 H273.2-91 H276.all'.
-
-    Chain matching:
-      - A chain token matches if it exactly equals any of:
-          chain.key_id (primary), chain.seg_id, chain.chain_id (if present).
+      - Terms in a group separated by commas and/or whitespace.
     """
 
-    def __init__(self, spec: str):
-        if not spec or not spec.strip():
+    def __init__(self, spec: Union[str, Iterable[str]]):
+        if spec is None:
             raise SelectionError("Empty selection spec")
         self._raw = spec
-        self._terms = self._parse(spec)
-        self._has_explicit_chains = any(t.chains is not None for t in self._terms)
+        # list of term-tuples; one tuple per group
+        self._groups: list[tuple[Term, ...]] = self._parse_groups(spec)
+        self._group_has_explicit = [any(t.chains is not None for t in grp) for grp in self._groups]
+        if not self._groups:
+            raise SelectionError("Empty selection spec")
+
+    # ----------------------------- public API --------------------------------
 
     def atom_lists(
         self, structure: Union[Structure, Model], model_index: int = 0
     ) -> list[list[int]]:
         """
-        Return one or more atom lists (each sorted, 0-based indices into Model.atoms)
-        according to the spec aggregation rule described in the class docstring.
+        Return one or more atom lists (each sorted, 0-based indices into Model.atoms).
+        One or more groups -> lists are concatenated in the same order as groups.
         """
-        if isinstance(structure, Structure):
-            model = structure.models[model_index]
-        else:
-            model = structure
+        model = structure.models[model_index] if isinstance(structure, Structure) else structure
         atom_to_idx = {id(a): i for i, a in enumerate(model.atoms)}
+        out_lists: list[list[int]] = []
 
-        # Map: alias_key -> set(resnums) selected for that alias
-        alias_to_resnums: dict[str, set[int]] = self._resolve_residues(model)
+        for grp, has_explicit in zip(self._groups, self._group_has_explicit):
+            alias_to_resnums = self._resolve_residues_for_terms(model, grp)
 
-        if self._has_explicit_chains:
-            # Pool across all chains referenced by the terms.
-            pooled: set[int] = set()
+            if has_explicit:
+                pooled: set[int] = set()
+                for ch in model.chains():
+                    resnums = _union_resnums_for_chain(ch, alias_to_resnums)
+                    if not resnums:
+                        continue
+                    for r in ch.residues:
+                        if r.resnum in resnums:
+                            for a in r.atoms:
+                                idx = atom_to_idx.get(id(a))
+                                if idx is not None:
+                                    pooled.add(idx)
+                if pooled:
+                    out_lists.append(sorted(pooled))
+                continue
+
+            # No explicit chains in this group ⇒ one list per chain with matches
             for ch in model.chains():
                 resnums = _union_resnums_for_chain(ch, alias_to_resnums)
                 if not resnums:
                     continue
+                acc: set[int] = set()
                 for r in ch.residues:
                     if r.resnum in resnums:
                         for a in r.atoms:
                             idx = atom_to_idx.get(id(a))
                             if idx is not None:
-                                pooled.add(idx)
-            return [sorted(pooled)]
+                                acc.add(idx)
+                if acc:
+                    out_lists.append(sorted(acc))
 
-        # No chains specified in any term: emit one list per chain (if any residues selected)
-        lists: list[list[int]] = []
-        for ch in model.chains():
-            resnums = _union_resnums_for_chain(ch, alias_to_resnums)
-            if not resnums:
-                continue
-            out: set[int] = set()
-            for r in ch.residues:
-                if r.resnum in resnums:
-                    for a in r.atoms:
-                        idx = atom_to_idx.get(id(a))
-                        if idx is not None:
-                            out.add(idx)
-            lists.append(sorted(out))
-        return lists
+        return out_lists
 
     def atom_indices(self, structure: Union[Structure, Model], model_index: int = 0) -> list[int]:
         """Flattened union of all lists returned by atom_lists()."""
@@ -760,31 +766,24 @@ class DomainSelector:
         return sorted(merged)
 
     def residue_keys(self, structure: Structure, model_index: int = 0) -> list[tuple[str, int]]:
-        """
-        Return sorted (chain_key_id, residue_number) present in the selection.
-        If explicit chains are used: union across selected chains.
-        If not: union across all chains where the per-chain list would be emitted.
-        """
+        """Union of (chain_key_id, residue_number) across all groups."""
         model = structure.models[model_index]
-        alias_to_resnums = self._resolve_residues(model)
-
         out: set[tuple[str, int]] = set()
-        for ch in model.chains():
-            resnums = _union_resnums_for_chain(ch, alias_to_resnums)
-            if not resnums:
-                continue
-            for r in ch.residues:
-                if r.resnum in resnums:
-                    out.add((ch.key_id, r.resnum))
+        for grp in self._groups:
+            alias_to_resnums = self._resolve_residues_for_terms(model, grp)
+            for ch in model.chains():
+                resnums = _union_resnums_for_chain(ch, alias_to_resnums)
+                if not resnums:
+                    continue
+                for r in ch.residues:
+                    if r.resnum in resnums:
+                        out.add((ch.key_id, r.resnum))
         return sorted(out)
 
     # --------------------------- internals ------------------------------------
 
-    def _resolve_residues(self, model: Model) -> dict[str, set[int]]:
-        """
-        Return a mapping from ANY acceptable chain alias (key_id, seg_id, chain_id)
-        to a set of residue numbers selected for that alias.
-        """
+    def _resolve_residues_for_terms(self, model: Model, terms: tuple[Term, ...]) -> dict[str, set[int]]:
+        """As _resolve_residues(), but for an explicit term group."""
         # Collect alias universe
         all_aliases: set[str] = set()
         chain_by_alias: dict[str, Chain] = {}
@@ -796,7 +795,7 @@ class DomainSelector:
 
         selected: dict[str, set[int]] = {}
 
-        for term in self._terms:
+        for term in terms:
             # Determine target aliases for this term
             if term.chains is None:
                 target_aliases = set(all_aliases)
@@ -825,13 +824,29 @@ class DomainSelector:
                     for r in ch.residues:
                         if term.residues.contains(r.resnum):
                             bucket.add(r.resnum)
-
         return selected
 
     @staticmethod
-    def _parse(spec: str) -> tuple[Term, ...]:
+    def _parse_groups(spec: Union[str, Iterable[str]]) -> list[tuple[Term, ...]]:
+        """
+        Return a list of term tuples. Each element of an iterable input is a separate group.
+        For a single string input, commas/whitespace split terms within one group.
+        """
+        if isinstance(spec, str):
+            return [DomainSelector._parse_terms(spec)]
+        # Iterable of group strings
+        groups: list[tuple[Term, ...]] = []
+        for s in spec:
+            if not isinstance(s, str) or not s.strip():
+                continue
+            groups.append(DomainSelector._parse_terms(s))
+        return groups
+
+    @staticmethod
+    def _parse_terms(group_spec: str) -> tuple[Term, ...]:
         terms: list[Term] = []
-        for raw_term in spec.split():
+        # split on commas and/or whitespace (multiple allowed)
+        for raw_term in re.split(r"[,\s]+", group_spec.strip()):
             t = raw_term.strip()
             if not t:
                 continue
@@ -857,8 +872,9 @@ class DomainSelector:
                 terms.append(Term(chains=chains, residues=residues))
 
         if not terms:
-            raise SelectionError(f"Could not parse spec '{spec}'")
+            raise SelectionError(f"Could not parse spec '{group_spec}'")
         return tuple(terms)
+
 
 
 # ----------------------------- helpers ---------------------------------------

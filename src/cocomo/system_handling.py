@@ -6,6 +6,9 @@ from dataclasses import dataclass, field
 from itertools import combinations
 from pathlib import Path
 from typing import Optional, Union
+import shlex
+
+from math import log
 
 import numpy as np
 from openmm.unit import (
@@ -31,20 +34,21 @@ FileLike = Union[str, Path, io.BytesIO, io.StringIO]
 class ComponentType:
     name: str = "unknown"  # e.g. "hexamer"
     nunit: Optional[int] = None  # number of individual units
-    domainres: list[list[int]] = field(default_factory=list)  # residue selection for domain
     sasa: list[tuple[int, float]] = field(default_factory=list)  # SASA per residue
-
-    sasapdb: Optional[FileLike] = None  # read PDB and calculate SASA
-    sasafile: Optional[FileLike] = None  # read SASA from file
-
-    domainsel: list[str] = field(default_factory=list)  # domain selection from strings
-    domainpdb: Optional[FileLike] = None  # PDB for parsing selection
-    domainmol: Optional[Union[Structure | Model]] = None  # molecule for parsing selection
-    domainfile: Optional[FileLike] = None  # read domain lists from file
-
+    domainres: list[list[int]] = field(default_factory=list)  # residue selection for domain
     enmpairs: list[int, int, float] = field(default_factory=list)  # ENM pair list
-    enmfile: Optional[FileLike] = None  # read ENM pairs from file
-    enmcutoff: float = 0.9  # nm
+
+    model: Optional[Model] = None # reference model
+
+    pdb: Optional[FileLike] = None # reference PDB file
+
+    getsasa: Optional[FileLike] = None  # read SASA from file, calculat if 'auto'
+
+    domainsel: Optional[str] = None  # domain selection from string
+    getdomains: Optional[FileLike] = None  # read domain lists from file
+
+    getenm: Optional[FileLike] = None  # read ENM pairs from file, calculate if 'auto'
+    enmcutoff: Optional[float] = None  # in nm, default is 0.9
 
     def __repr__(self) -> str:
         r = f"<component type {self.name!r} with {self.nunit} units"
@@ -53,54 +57,58 @@ class ComponentType:
         return r
 
     def __post_init__(self) -> None:
-        spdb = None
-        sca = None
+        if self.enmcutoff is None:
+            self.enmcutoff=0.9
 
-        if self.sasapdb is not None and len(self.sasa) == 0:
-            _ensure_readable(self.sasapdb)
-            spdb = PDBReader(self.sasapdb)
-            self.sasa = spdb.sasa_by_residue(n_sphere_points=1920)
+        if self.pdb is not None:
+            _ensure_readable(self.pdb)
+            s=PDBReader(self.pdb)
+            self.model=s[0]
 
-        if self.sasafile is not None and len(self.sasa) == 0:
-            _ensure_readable(self.sasafile)
-            self.sasa = ComponentType._read_sasa_table(self.sasafile)
-
-        if self.domainmol is not None:
-            sca = self.domainmol.select_CA()
-        elif self.domainpdb is not None:
-            _ensure_readable(self.domainpdb)
-            sca = PDBReader(self.domainpdb).select_CA()
-        elif spdb is not None:
-            sca = spdb.select_CA()
-
-        if self.domainfile is not None and len(self.domainres) == 0:
-            _ensure_readable(self.domainfile)
-            self.domainres = np.loadtxt(self.domainfile, dtype=int, ndmin=2).tolist()
-
-        if len(self.domainsel) > 0 and len(self.domainres) == 0:
-            if sca is not None:
-                self.domainres = DomainSelector(self.domainsel).atom_lists(sca)
+        if self.getsasa is not None and len(self.sasa) == 0:
+            if self.getsasa == 'auto':
+                if self.model is None:
+                    raise ValueError('Reference structure needed for SASA calculation')
+                mca=self.model.select_CA()
+                if (mca.natoms()==self.model.natoms()): 
+                    raise ValueError("Cannot calculate SASA from C-alpha coordinates")
+                self.sasa = self.model.sasa_by_residue(n_sphere_points=1920)
             else:
-                raise ValueError("No structure available for selection.")
+                _ensure_readable(self.getsasa)
+                self.sasa = ComponentType._read_sasa_table(self.getsasa)
+            self.sasa = self._coerce_sasa_pairs(self.sasa)
 
-        if len(self.domainres) > 0 and sca is not None:
-            enmpairs = self._findENMPairs(sca)
-            self.enmpairs.extend(enmpairs)
+        if self.getdomains is not None and len(self.domainres) == 0:
+            _ensure_readable(self.getdomains)
+            self.domainres = np.loadtxt(self.getdomains, dtype=int, ndmin=2).tolist()
 
-        if self.enmfile is not None:
-            _ensure_readable(self.enmfile)
-            data = np.loadtxt(self.enmfile, dtype=float)
-            data = np.atleast_2d(data)
-            pairs: list[tuple[int, int, Quantity]] = []
-            for i, j, d in data:
-                pairs.append((int(i), int(j), float(d) * nanometer))
-            self.enmpairs.extend(pairs)
+        if self.domainsel is not None and len(self.domainres) == 0:
+            if self.model is None:
+                raise ValueError('Reference structure needed for domain selection')
+            mca=self.model.select_CA()
+            self.domainres = DomainSelector(self.domainsel).atom_lists(mca)
 
-        self.sasa = self._coerce_sasa_pairs(self.sasa)
+        if self.getenm is not None:
+            if self.getenm == 'auto':
+                if len(self.domainres) == 0:
+                    raise ValueError('Need domain selection to calculate ENM pairs')
+                if self.model is None:
+                    raise ValueError('Reference structure needed for ENM pairs')
+                mca=self.model.select_CA()
+                enmpairs = self._findENMPairs(mca)
+                self.enmpairs.extend(enmpairs)
+            else:
+                _ensure_readable(self.getenm)
+                data = np.loadtxt(self.getenm, dtype=float)
+                data = np.atleast_2d(data)
+                pairs: list[tuple[int, int, Quantity]] = []
+                for i, j, d in data:
+                    pairs.append((int(i), int(j), float(d) * nanometer))
+                self.enmpairs.extend(pairs)
 
         if self.nunit is None:
-            if sca is not None:
-                self.nunit = sca.nchains()
+            if self.model is not None:
+                self.nunit = self.model.nchains()
             else:
                 self.nunit = 1
 
@@ -183,6 +191,36 @@ class ComponentType:
         # fallback: treat as empty
         return []
 
+    def writeout(
+        self, 
+        tag: str = "none",
+        path: Union[str | Path] = "data", 
+        *, 
+        dir: Union[str | Path] = "." 
+    ) -> None:
+        base=Path(dir)
+        base.mkdir(parents=True, exist_ok=True) 
+
+        if tag == 'sasa' and self.sasa:
+             idx, val = zip(*self.sasa)
+             np.savetxt(
+                 base / path, np.column_stack([idx, val]), fmt="%d %.8f"
+             ) 
+
+        if tag == 'domains' and self.domainres:
+             domain = np.asarray(self.domainres, dtype=int)
+             domain = np.atleast_2d(domain)
+             np.savetxt(base / path, domain, fmt="%d")
+
+        if tag == 'enm' and self.enmpairs:
+             pairs = []
+             for i, j, w in self.enmpairs or []:
+                 pairs.append((int(i), int(j), w.value_in_unit(nanometer)))
+             if pairs:
+                 arr = np.asarray(pairs, dtype=float)
+                 np.savetxt(base / path, arr, fmt=["%d", "%d", "%.6f"], delimiter=" ")
+
+
     # Dense view (optional) ----------------------------------------------------
     def sasa_dense(self) -> np.ndarray:
         """
@@ -222,15 +260,12 @@ class ComponentType:
 
     @staticmethod
     def read_list(
-        path: FileLike | Path | str = "component_types",
+        path: Union[FileLike | Path | str] = "component_types",
         *,
-        writeout: bool = False,
         dir: Union[str | Path] = ".",
-        enmcutoff: Optional[float] = None,
     ) -> dict[str, ComponentType]:
         """
         Read component types from `path` (path or file-like) and return {key: ComponentType}.
-        Two formats are supported (see original docstring).
         """
         base = Path(dir)
         comps: dict[str, ComponentType] = {}
@@ -248,84 +283,66 @@ class ComponentType:
             fh = p.open()
             need_close = True
 
-        if writeout:
-            base.mkdir(parents=True, exist_ok=True)
-
         try:
             for ln, line in enumerate(fh, 1):
                 line = line.strip()
                 if not line or line.startswith("#"):
                     continue
-                parts = line.split()
-                if len(parts) < 3:
-                    raise ValueError(f"{path}:{ln}: expected 3 columns, got {len(parts)}")
 
-                key, col2, col3 = parts[0], parts[1], parts[2]
+                tokens=_parse_line(line)
+              
+                name='unknown' 
+                if 'tag' in tokens:
+                    name=tokens['tag']
+                if 'name' in tokens:
+                    name=tokens['name']
 
-                if col2.endswith(".pdb"):  # Format 1
-                    tag = Path(col2).stem
-                    selection = col3
-                    if enmcutoff is not None:
-                        ct = ComponentType(
-                            name=key,
-                            sasapdb=str(base / f"{tag}.pdb"),
-                            domainsel=selection,
-                            enmcutoff=enmcutoff,
-                        )
-                    else:
-                        ct = ComponentType(
-                            name=key,
-                            sasapdb=str(base / f"{tag}.pdb"),
-                            domainsel=selection,
-                        )
-                    comps[key] = ct
+                pdb=None
+                if 'pdb' in tokens:
+                    pdb=str(base / tokens['pdb'])
 
-                    if writeout:
-                        if ct.sasa:
-                            idx, val = zip(*ct.sasa)
-                            np.savetxt(
-                                base / f"{tag}.surface", np.column_stack([idx, val]), fmt="%d %.8f"
-                            )
-                        else:
-                            open(base / f"{tag}.surface", "w").close()
+                getsasa=None 
+                if 'sasa' in tokens:
+                     if tokens['sasa'] == 'auto':
+                         getsasa='auto'
+                     else:
+                         getsasa=str(base / tokens['sasa'])
 
-                        domain = np.asarray(ct.domainres, dtype=int)
-                        domain = np.atleast_2d(domain)
-                        np.savetxt(base / f"{tag}.domainsel", domain, fmt="%d")
+                domainsel=None
+                if 'domains' in tokens:
+                     domainsel=tokens['domains']
+                 
+                getdomains=None
+                if 'domainfile' in tokens:
+                     getdomains=str(base / tokens['domainfile'])
+        
+                getenm=None
+                if 'enm' in tokens:
+                     if tokens['enm'] == 'auto':
+                         getenm='auto'
+                     else:
+                         getenm=str(base / tokens['enm'])
 
-                        pairs = []
-                        for i, j, w in ct.enmpairs or []:
-                            pairs.append((int(i), int(j), w.value_in_unit(nanometer)))
+                enmcutoff=None
+                if 'enmcutoff' in  tokens:
+                    enmcutoff=float(tokens['enmcutoff']) 
 
-                        path = base / f"{tag}.enmpairs"
-                        if not pairs:
-                            path.write_text("")
-                        else:
-                            arr = np.asarray(pairs, dtype=float)
-                            np.savetxt(path, arr, fmt=["%d", "%d", "%.6f"], delimiter=" ")
+                ct = ComponentType(
+                    name=name, 
+                    pdb=pdb, 
+                    getsasa=getsasa, 
+                    domainsel=domainsel, 
+                    getdomains=getdomains,
+                    getenm=getenm,
+                    enmcutoff=enmcutoff,
+                   )
 
-                else:  # Format 2
-                    if len(parts) > 3:
-                        col4 = parts[3]
-                        ct = ComponentType(
-                            name=key,
-                            sasafile=str(base / f"{col2}"),
-                            domainfile=str(base / f"{col3}"),
-                            enmfile=str(base / f"{col4}"),
-                        )
-                    else:
-                        ct = ComponentType(
-                            name=key,
-                            sasafile=str(base / f"{col2}"),
-                            domainfile=str(base / f"{col3}"),
-                        )
-                    comps[key] = ct
+                comps[name] = ct
         finally:
             if need_close:
                 fh.close()
 
         return comps
-
 
 @dataclass
 class Component:
@@ -335,18 +352,281 @@ class Component:
     def __repr__(self) -> str:
         return f"<component {self.ctype.name!r} with segments {self.segment}>"
 
+@dataclass
+class Interaction:
+    pairs: list[tuple[int, int]] = field(default_factory=list)  # global CA indices (i, j)
+    strength: float = 1.0   # force constant (computed from probability)
+    distance: float = 0.8   # reference distance [nm]
+
+
+@dataclass
+class InteractionSet:
+    ctypeA: ComponentType = None
+    ctypeB: ComponentType = None
+
+    interactions: Optional[list[Interaction]] = field(default_factory=list)
+
+    mode: Optional[str] = 'all'          # 'all' or 'exclusive'
+    potential: Optional[str] = 'switch'  # 'Go', 'harmonic', 'switch'
+    value: Optional[str] = 'asis'        # 'asis', 'logit', 'neglog'
+    scale: Optional[float] = 1.0
+    offset: Optional[float] = 0.0
+
+    defdist: Optional[float] = 0.8
+    defprob: Optional[float] = 1.0
+
+    contacttable: Optional[str] = None
+    options: Optional[str] = None
+
+    def __repr__(self) -> str:
+        msg = f"<interaction set {self.ctypeA.name!r} - {self.ctypeB.name!r}"
+        msg += f" with {len(self.interactions or [])} interactions>"
+        return msg
+
+    def __post_init__(self) -> None:
+        # Parse options (robust, but minimal)
+        if self.options:
+            for s in (x.strip() for x in self.options.split(',')):
+                if not s:
+                    continue
+                name, val = _parse_option_value(s)
+                if name == 'exclusive':
+                    self.mode = 'exclusive'
+                elif name == 'all':
+                    self.mode = 'all'
+                elif name.lower() == 'switch':
+                    self.potential = 'switch'
+                elif name.lower() == 'go':
+                    self.potential = 'Go'
+                elif name.lower() == 'harmonic':
+                    self.potential = 'harmonic'
+                elif name in ('asis', 'logit', 'neglog'):
+                    self.value = name
+                    if val != 0.0:
+                        self.offset = float(val)
+                elif name == 'distance' and val > 0:
+                    self.defdist = float(val)
+                elif name in ('prob', 'probability') and val > 0:
+                    self.defprob = float(val)
+
+        if self.contacttable:
+            self.interactions = self._read_contact_table(self.contacttable)
+
+    # --- contact table reader -------------------------------------------------
+    def _read_contact_table(self, path: FileLike) -> list[Interaction]:
+        """
+        Read a contact table where each non-empty, non-comment line has one or more
+        comma-separated columns. First two fields are residue selections (A, B);
+        optional 3rd = probability; optional 4th = distance (nm).
+        Columns after the first inherit prob/dist from column 1 unless overridden.
+        Columns with identical (prob, dist) on the same line are merged into one
+        Interaction (pairs union); different (prob, dist) create separate Interactions.
+        """
+        if self.ctypeA is None or self.ctypeB is None:
+            raise ValueError("InteractionSet requires ctypeA and ctypeB")
+        if self.ctypeA.model is None or self.ctypeB.model is None:
+            raise ValueError("Both component types must have reference models to build pairs")
+
+        # open handle
+        base = Path(".")
+        need_close = False
+        if _is_fileobj(path):
+            fh = path  # type: ignore[assignment]
+        else:
+            p = Path(path)
+            if not p.is_file() and not p.is_absolute():
+                p = base / p
+            _ensure_readable(p)
+            fh = p.open()  # type: ignore[assignment]
+            need_close = True
+
+        interactions: list[Interaction] = []
+
+        try:
+            for ln, raw in enumerate(fh, 1):
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+
+                # Split into "columns" (whitespace-separated). Each column then has comma fields.
+                cols = [c for c in line.split() if c]
+                if not cols:
+                    continue
+
+                # Parse first column for defaults
+                first = self._parse_column(cols[0], lineno=ln)
+                base_prob = self.defprob if first.prob is None else first.prob
+                base_dist = self.defdist if first.dist is None else first.dist
+
+                # Build a list of per-column parsed specs with inherited defaults
+                parsed = []
+                for col in cols:
+                    spec = self._parse_column(col, lineno=ln)
+                    prob = base_prob if spec.prob is None else spec.prob
+                    dist = base_dist if spec.dist is None else spec.dist
+                    parsed.append((spec.selA, spec.selB, prob, dist))
+
+                # Group columns by (prob, dist) so alternates with same parameters merge
+                groups: dict[tuple[float, float], list[tuple[str, str]]] = {}
+                for selA, selB, prob, dist in parsed:
+                    key = (float(prob), float(dist))
+                    groups.setdefault(key, []).append((selA, selB))
+
+                # For each group, compute union of pairs and create Interaction
+                for (prob, dist), selections in groups.items():
+                    pair_set: set[tuple[int, int]] = set()
+                    for selA, selB in selections:
+                        pairs = self._pairs_from_selections(selA, selB)
+                        pair_set.update(pairs)
+
+                    if not pair_set:
+                        continue
+
+                    strength = self._strength_from_probability(prob)
+                    interactions.append(
+                        Interaction(
+                            pairs=sorted(pair_set),
+                            strength=strength,
+                            distance=float(dist),
+                        )
+                    )
+        finally:
+            if need_close:
+                fh.close()
+
+        return interactions
+
+    # Helper: one comma-delimited column
+    @dataclass
+    class _ColSpec:
+        selA: str
+        selB: str
+        prob: Optional[float]
+        dist: Optional[float]
+
+    def _parse_column(self, col: str, *, lineno: int) -> "_ColSpec":
+        parts = [p for p in col.split(",") if p != ""]
+        if len(parts) < 2:
+            raise ValueError(f"contact table line {lineno}: need at least two fields 'A,B[,prob[,dist]]'")
+        selA = parts[0].strip()
+        selB = parts[1].strip()
+        prob = float(parts[2]) if len(parts) >= 3 else None
+        dist = float(parts[3]) if len(parts) >= 4 else None
+        return InteractionSet._ColSpec(selA=selA, selB=selB, prob=prob, dist=dist)
+
+    # Helper: selection -> all (i,j) combinations
+    def _pairs_from_selections(self, selA: str, selB: str) -> list[tuple[int, int]]:
+        # DomainSelector(...).atom_lists(model) returns lists of residue indices per selection.
+        listsA = DomainSelector(selA).atom_lists(self.ctypeA.model)
+        listsB = DomainSelector(selB).atom_lists(self.ctypeB.model)
+
+        pairs: list[tuple[int, int]] = []
+        for la in listsA or []:
+            for lb in listsB or []:
+                for i in la:
+                    for j in lb:
+                        if i == j and self.ctypeA is self.ctypeB:
+                            # allow same-index across different components; 
+                            # skip strict self-self within identical model indexing
+                            pass
+                        pairs.append((int(i), int(j)))
+        return pairs
+
+    # Helper: probability -> strength with transform, offset, scale, clamp>=0
+    def _strength_from_probability(self, p: float) -> float:
+        # guard against exact 0/1 for log/ratio
+        eps = 1e-12
+        x = float(p)
+        if self.value == 'logit':
+            x = log(min(max(p, eps), 1.0 - eps) / max(1.0 - p, eps))
+        elif self.value == 'neglog':
+            x = -log(max(p, eps))
+        elif self.value == 'asis':
+            x = p
+        else:
+            # fallback to 'asis' if unknown
+            x = p
+        y = (x + float(self.offset)) * float(self.scale)
+        return y if y > 0.0 else 0.0
+
+
+    @staticmethod
+    def read_list(
+        ctypes: dict[str, ComponentTypes], 
+        path: Union[FileLike | Path | str] = "interactions",
+        *,
+        dir: Union[str | Path] = ".",
+    ) -> dict[str, InteractionSet]:
+        """
+        Read interaction sets from `path` (path or file-like) and return {key: InteractionSet}.
+        """
+        base = Path(dir)
+        ints: dict[str, InteractionSet] = {}
+
+        # open handle
+        need_close = False
+        if _is_fileobj(path):
+            fh = path  # already-open file-like
+        else:
+            p = Path(path)
+            if not p.is_file() and not p.is_absolute():
+                p = base / p
+            if not p.is_file():
+                raise FileNotFoundError(f"interactions file not found: {p}")
+            fh = p.open()
+            need_close = True
+
+        try:
+            for ln, line in enumerate(fh, 1):
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split()
+                if len(parts) < 3:
+                    raise ValueError(f"{path}:{ln}: expected at least 3 columns, got {len(parts)}")
+
+                tag1, tag2, ftable = parts[0], parts[1], parts[2]
+
+                if tag1 not in ctypes:
+                    raise ValueError(f"{tag1} not in component types")
+                if tag2 not in ctypes:
+                    raise ValueError(f"{tag2} not in component types")
+
+                if len(parts) > 3:
+                    options=parts[3]
+                else:
+                    options=None
+
+                intset = InteractionSet(
+                    ctypeA=ctypes[tag1],
+                    ctypeB=ctypes[tag2],
+                    contacttable=ftable,
+                    options=options,
+                   )
+
+                key=f'{tag1}.{tag2}'
+                ints[key] = intset
+        finally:
+            if need_close:
+                fh.close()
+
+        return ints 
+
 
 @dataclass
 class Assembly:
     component: list[Component] = field(default_factory=list)
     ctype: dict[str, ComponentType] = field(default_factory=dict)  # name -> type
+    interaction: list[Interaction] = field(default_factory=list)
     model: Union[Structure, Model, None] = None
 
     sasa: list[float] = field(default_factory=list)
     domains: list[list[int]] = field(default_factory=list)
 
     def __repr__(self) -> str:
-        return f"<assembly has {len(self.component)} components and {len(self.ctype)} types>"
+        msg=f"<assembly has {len(self.component)} components, {len(self.ctype)} types"
+        msg+=f" and {len(self.interaction)} interaction sets>"
+        return msg
 
     __str__ = __repr__
 
@@ -354,10 +634,10 @@ class Assembly:
         self,
         components: Union[FileLike, None] = None,
         types: Union[FileLike, None] = None,
-        mol: Union[Structure, Model, None] = None,
         *,
+        structure: Union[Structure, Model, FileLike, None] = None,
+        interactions: Union[FileLike, None] = None,
         dir: Union[str, Path] = ".",
-        enmcutoff: Optional[float] = None,
     ) -> None:
         """
         If `components` and `types` are provided, load an Assembly from disk,
@@ -366,6 +646,7 @@ class Assembly:
         """
         self.component = []
         self.ctype = {}  # dict[str, ComponentType]
+        self.interaction = []
         self.model = None
         self.sasa = []
         self.domains = []
@@ -373,14 +654,27 @@ class Assembly:
 
         if (components is None) ^ (types is None):
             raise ValueError("Provide both components and types file names, or neither.")
-        if components is not None and types is not None:
-            self.read_components(components, types, dir=dir, enmcutoff=enmcutoff)
-        if mol is not None:
-            if isinstance(mol, Structure):
-                if mol.models:
-                    self.model = mol.models[0].select_CA()
+
+        if structure is not None:
+            if isinstance(structure, Structure):
+                if structure.models:
+                    self.model = structure.models[0].select_CA()
+            elif isinstance(structure, Model):
+                self.model = structure.select_CA()
             else:
-                self.model = mol.select_CA()
+                if _is_fileobj(structure):
+                    self.model = PDBReader(structure).models[0].select_CA()
+                else:
+                    spath=Path(structure)
+                    if not spath.is_absolute():
+                        spath = Path(dir) / spath
+                    _ensure_readable(spath)
+                    self.model = PDBReader(spath).models[0].select_CA()
+
+        if components is not None and types is not None:
+            self.read_components(components, types, dir=dir)
+        if interactions is not None:
+            self.read_interactions(interactions, dir=dir)
 
     def components(self) -> Iterator[Component]:
         return iter(self.component)
@@ -414,14 +708,21 @@ class Assembly:
             out.extend(comp.segment)
         return out
 
+    def read_interactions(
+        self,
+        inter_file: FileLike,
+        *,
+        dir: Union[str,Path] = ".",
+    ) -> None:
+        return
+
     def read_components(
         self,
         comp_file: FileLike,
         type_file: FileLike,
         *,
         dir: Union[str, Path] = ".",
-        enmcutoff: Optional[float] = None,
-    ) -> Assembly:
+    ) -> None:
         """
         Build an Assembly from a component list file and a component-type file.
         """
@@ -438,13 +739,13 @@ class Assembly:
 
         if _is_fileobj(type_file):
             type_source = type_file
-            types = ComponentType.read_list(type_source, dir=base, enmcutoff=enmcutoff)
+            types = ComponentType.read_list(type_source, dir=base)
         else:
             type_path = Path(type_file)
             if not type_path.is_absolute():
                 type_path = base / type_path
             _ensure_readable(type_path)
-            types = ComponentType.read_list(type_path, dir=base, enmcutoff=enmcutoff)
+            types = ComponentType.read_list(type_path, dir=base)
 
         if _is_fileobj(comp_source):
             fh = comp_source
@@ -700,3 +1001,49 @@ def _ensure_readable(f: FileLike) -> None:
     p = Path(f)
     if not p.is_file():
         raise FileNotFoundError(p)
+
+def _parse_line(line: str) -> dict[str, str]:
+    """
+    Parse a line of space-separated tokens into a dict.
+    - First token may be bare (no '='); it will be stored as key 'tag'.
+    - All remaining tokens must be key=value; values may be quoted.
+
+    Examples
+    --------
+    >>> parse_line("mytag a=1 b=two c='three words'")
+    {'tag': 'mytag', 'a': '1', 'b': 'two', 'c': 'three words'}
+    >>> parse_line("a=1 b=2")
+    {'a': '1', 'b': '2'}
+    >>> parse_line("onlytag")
+    {'tag': 'onlytag'}
+    """
+    tokens = shlex.split(line, posix=True)
+    out: Dict[str, str] = {}
+    if not tokens:
+        return out
+
+    idx = 0
+    if "=" not in tokens[0]:
+        out["tag"] = tokens[0]
+        idx = 1
+
+    for tok in tokens[idx:]:
+        if "=" not in tok:
+            raise ValueError(f"Invalid token without '=': {tok!r}")
+        k, v = tok.split("=", 1)
+        out[k] = v
+    return out
+
+def _parse_option_value(s: str) -> tuple[str, float]:
+    s = s.strip()
+    if "(" not in s:
+        return s, 0.0
+    if not s.endswith(")"):
+        raise ValueError(f"Invalid option(value): {s!r}")
+    name, inner = s.split("(", 1)
+    name = name.strip()
+    if not name:
+        raise ValueError("Empty option name")
+    inner = inner[:-1].strip()  # drop trailing ')'
+    value = 0.0 if inner == "" else float(inner)
+    return name, value

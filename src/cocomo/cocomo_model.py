@@ -244,10 +244,6 @@ class COCOMO:
 
         self.simulation = None
 
-        self.topology = topology
-
-        self.set_sasa(sasa)
-
         self.version = 2 if version is None else version
         self.set_params(self.version)
 
@@ -257,15 +253,23 @@ class COCOMO:
         self.cutoff = cutoff * nanometer
         self.switching = switching
 
-        self.set_positions(positions)
-        self.set_domains(domains)
-
         self.enmforce = enmforce / nanometer**2
         self.enmcutoff = enmcutoff * nanometer
-        if enmpairs is None:
-            self.enmpairs = self._findENMPairs()
+
+        if topology.__class__.__name__ == 'Assembly':
+            self.topology=topology.model.topology()
+            self.sasa=topology.get_sasa()
+            self.set_positions(topology.model.positions())
+            self.enmpairs=topology.get_enmpairs()
         else:
-            self.enmpairs = enmpairs
+            self.topology = topology
+            self.set_sasa(sasa)
+            self.set_positions(positions)
+            self.set_domains(domains)
+            if enmpairs is None:
+                self.enmpairs = self._findENMPairs()
+            else:
+                self.enmpairs = enmpairs
 
         if xml is not None:
             self.read_system(xml)
