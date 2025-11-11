@@ -1027,18 +1027,6 @@ class Assembly:
             map_fn = _make_map_fn(seginfo)  # early-bind seginfo, no lambda assignment
             maps_by_type.setdefault(comp.ctype.name, []).append((comp_idx, map_fn))
 
-        #        maps_by_type: dict[str, list[tuple[int, callable]]] = {}
-        #        comp_idx = -1
-        #        for comp in self.component:
-        #            # build seginfo only for components actually present
-        #            seginfo = Assembly._comp_seginfo(comp.segment, seg_offsets)
-        #            if not seginfo:
-        #                continue
-        #            comp_idx += 1
-        #
-        #            map_fn = (lambda i, seginfo=seginfo: Assembly._map_component_index(int(i), seginfo))
-        #            maps_by_type.setdefault(comp.ctype.name, []).append((comp_idx, map_fn))
-
         # For each defined InteractionSet, expand to all present component pairs
         # of the corresponding types. For identical types, use combinations (i<j).
         for intset in self.interact.values():
