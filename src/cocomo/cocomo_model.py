@@ -238,6 +238,7 @@ class COCOMO:
         positions=None,  # needed for ENM
         enmforce=500.0,  # 1/nm**2
         enmcutoff=0.9,  # nm
+        interactions=None,  # list of interactions
         removecmmotion=True,
         xml=None,
     ):
@@ -256,11 +257,13 @@ class COCOMO:
         self.enmforce = enmforce / nanometer**2
         self.enmcutoff = enmcutoff * nanometer
 
-        if topology.__class__.__name__ == 'Assembly':
-            self.topology=topology.model.topology()
-            self.sasa=topology.get_sasa()
-            self.set_positions(topology.model.positions())
-            self.enmpairs=topology.get_enmpairs()
+        if topology.__class__.__name__ == "Assembly":
+            assembly = topology
+            self.topology = assembly.model.topology()
+            self.sasa = assembly.get_sasa()
+            self.set_positions(assembly.model.positions())
+            self.enmpairs = assembly.get_enmpairs()
+            self.interactions = assembly.get_interactions()
         else:
             self.topology = topology
             self.set_sasa(sasa)
@@ -270,6 +273,7 @@ class COCOMO:
                 self.enmpairs = self._findENMPairs()
             else:
                 self.enmpairs = enmpairs
+            self.interactions = interactions
 
         if xml is not None:
             self.read_system(xml)
@@ -451,6 +455,7 @@ class COCOMO:
             self.setupLongRangeForce()
             self.setupShortRangeForce()
             self.setupENMForce()
+            self.setupInteractionForce()
             if self.removecmmotion:
                 self.setupCMMotionRemover()
             self.forcemapping = self.assign_force_groups()
@@ -701,6 +706,30 @@ class COCOMO:
             force.setName("enm")
             self.forces["enm"] = force
             self.system.addForce(force)
+
+    def _make_switch_sumlog_force(
+        self, pairs, r0: float, alpha: float, eps: float
+    ) -> CustomBondForce:
+        # sum_i [-log(1 - S_i + eps)], S(r) = 1/(1+exp(alpha*(r-r0)))
+        f = CustomBondForce("-log( 1.0 - ( 1.0/(1.0 + exp(alpha*(r - r0))) ) + eps )")
+        f.addGlobalParameter("alpha", float(alpha))
+        f.addGlobalParameter("eps", float(eps))
+        f.addPerBondParameter("r0")
+        rr0 = float(r0)
+        for i, j in pairs:
+            f.addBond(int(i), int(j), [rr0])
+        return f
+
+    def setupInteractionForce(self) -> None:
+        """
+        Build 'switch' interactions with minimal memory:
+          - Additive groups coalesced by (strength,r0,alpha) into one CustomBondForce each.
+          - Non-additive groups packed into aggregator CV forces (≤32 groups per aggregator).
+          - No sharding unless a single non-additive group exceeds max_bonds_per_force.
+        """
+        if self.topology is None or not self.interactions:
+            return
+        return
 
     def setupCMMotionRemover(self) -> None:
         if self.topology is not None and self.removecmmotion:

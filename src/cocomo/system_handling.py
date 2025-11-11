@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import io
+import shlex
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from itertools import combinations
-from pathlib import Path
-from typing import Optional, Union
-import shlex
-
 from math import log
+from pathlib import Path
+from typing import Callable, Optional, Union
 
 import numpy as np
 from openmm.unit import (
@@ -38,9 +37,9 @@ class ComponentType:
     domainres: list[list[int]] = field(default_factory=list)  # residue selection for domain
     enmpairs: list[int, int, float] = field(default_factory=list)  # ENM pair list
 
-    model: Optional[Model] = None # reference model
+    model: Optional[Model] = None  # reference model
 
-    pdb: Optional[FileLike] = None # reference PDB file
+    pdb: Optional[FileLike] = None  # reference PDB file
 
     getsasa: Optional[FileLike] = None  # read SASA from file, calculat if 'auto'
 
@@ -58,19 +57,19 @@ class ComponentType:
 
     def __post_init__(self) -> None:
         if self.enmcutoff is None:
-            self.enmcutoff=0.9
+            self.enmcutoff = 0.9
 
         if self.pdb is not None:
             _ensure_readable(self.pdb)
-            s=PDBReader(self.pdb)
-            self.model=s[0]
+            s = PDBReader(self.pdb)
+            self.model = s[0]
 
         if self.getsasa is not None and len(self.sasa) == 0:
-            if self.getsasa == 'auto':
+            if self.getsasa == "auto":
                 if self.model is None:
-                    raise ValueError('Reference structure needed for SASA calculation')
-                mca=self.model.select_CA()
-                if (mca.natoms()==self.model.natoms()): 
+                    raise ValueError("Reference structure needed for SASA calculation")
+                mca = self.model.select_CA()
+                if mca.natoms() == self.model.natoms():
                     raise ValueError("Cannot calculate SASA from C-alpha coordinates")
                 self.sasa = self.model.sasa_by_residue(n_sphere_points=1920)
             else:
@@ -84,17 +83,17 @@ class ComponentType:
 
         if self.domainsel is not None and len(self.domainres) == 0:
             if self.model is None:
-                raise ValueError('Reference structure needed for domain selection')
-            mca=self.model.select_CA()
+                raise ValueError("Reference structure needed for domain selection")
+            mca = self.model.select_CA()
             self.domainres = DomainSelector(self.domainsel).atom_lists(mca)
 
         if self.getenm is not None:
-            if self.getenm == 'auto':
+            if self.getenm == "auto":
                 if len(self.domainres) == 0:
-                    raise ValueError('Need domain selection to calculate ENM pairs')
+                    raise ValueError("Need domain selection to calculate ENM pairs")
                 if self.model is None:
-                    raise ValueError('Reference structure needed for ENM pairs')
-                mca=self.model.select_CA()
+                    raise ValueError("Reference structure needed for ENM pairs")
+                mca = self.model.select_CA()
                 enmpairs = self._findENMPairs(mca)
                 self.enmpairs.extend(enmpairs)
             else:
@@ -192,34 +191,27 @@ class ComponentType:
         return []
 
     def writeout(
-        self, 
-        tag: str = "none",
-        path: Union[str | Path] = "data", 
-        *, 
-        dir: Union[str | Path] = "." 
+        self, tag: str = "none", path: Union[str | Path] = "data", *, dir: Union[str | Path] = "."
     ) -> None:
-        base=Path(dir)
-        base.mkdir(parents=True, exist_ok=True) 
+        base = Path(dir)
+        base.mkdir(parents=True, exist_ok=True)
 
-        if tag == 'sasa' and self.sasa:
-             idx, val = zip(*self.sasa)
-             np.savetxt(
-                 base / path, np.column_stack([idx, val]), fmt="%d %.8f"
-             ) 
+        if tag == "sasa" and self.sasa:
+            idx, val = zip(*self.sasa)
+            np.savetxt(base / path, np.column_stack([idx, val]), fmt="%d %.8f")
 
-        if tag == 'domains' and self.domainres:
-             domain = np.asarray(self.domainres, dtype=int)
-             domain = np.atleast_2d(domain)
-             np.savetxt(base / path, domain, fmt="%d")
+        if tag == "domains" and self.domainres:
+            domain = np.asarray(self.domainres, dtype=int)
+            domain = np.atleast_2d(domain)
+            np.savetxt(base / path, domain, fmt="%d")
 
-        if tag == 'enm' and self.enmpairs:
-             pairs = []
-             for i, j, w in self.enmpairs or []:
-                 pairs.append((int(i), int(j), w.value_in_unit(nanometer)))
-             if pairs:
-                 arr = np.asarray(pairs, dtype=float)
-                 np.savetxt(base / path, arr, fmt=["%d", "%d", "%.6f"], delimiter=" ")
-
+        if tag == "enm" and self.enmpairs:
+            pairs = []
+            for i, j, w in self.enmpairs or []:
+                pairs.append((int(i), int(j), w.value_in_unit(nanometer)))
+            if pairs:
+                arr = np.asarray(pairs, dtype=float)
+                np.savetxt(base / path, arr, fmt=["%d", "%d", "%.6f"], delimiter=" ")
 
     # Dense view (optional) ----------------------------------------------------
     def sasa_dense(self) -> np.ndarray:
@@ -289,53 +281,53 @@ class ComponentType:
                 if not line or line.startswith("#"):
                     continue
 
-                tokens=_parse_line(line)
-              
-                name='unknown' 
-                if 'tag' in tokens:
-                    name=tokens['tag']
-                if 'name' in tokens:
-                    name=tokens['name']
+                tokens = _parse_line(line)
 
-                pdb=None
-                if 'pdb' in tokens:
-                    pdb=str(base / tokens['pdb'])
+                name = "unknown"
+                if "tag" in tokens:
+                    name = tokens["tag"]
+                if "name" in tokens:
+                    name = tokens["name"]
 
-                getsasa=None 
-                if 'sasa' in tokens:
-                     if tokens['sasa'] == 'auto':
-                         getsasa='auto'
-                     else:
-                         getsasa=str(base / tokens['sasa'])
+                pdb = None
+                if "pdb" in tokens:
+                    pdb = str(base / tokens["pdb"])
 
-                domainsel=None
-                if 'domains' in tokens:
-                     domainsel=tokens['domains']
-                 
-                getdomains=None
-                if 'domainfile' in tokens:
-                     getdomains=str(base / tokens['domainfile'])
-        
-                getenm=None
-                if 'enm' in tokens:
-                     if tokens['enm'] == 'auto':
-                         getenm='auto'
-                     else:
-                         getenm=str(base / tokens['enm'])
+                getsasa = None
+                if "sasa" in tokens:
+                    if tokens["sasa"] == "auto":
+                        getsasa = "auto"
+                    else:
+                        getsasa = str(base / tokens["sasa"])
 
-                enmcutoff=None
-                if 'enmcutoff' in  tokens:
-                    enmcutoff=float(tokens['enmcutoff']) 
+                domainsel = None
+                if "domains" in tokens:
+                    domainsel = tokens["domains"]
+
+                getdomains = None
+                if "domainfile" in tokens:
+                    getdomains = str(base / tokens["domainfile"])
+
+                getenm = None
+                if "enm" in tokens:
+                    if tokens["enm"] == "auto":
+                        getenm = "auto"
+                    else:
+                        getenm = str(base / tokens["enm"])
+
+                enmcutoff = None
+                if "enmcutoff" in tokens:
+                    enmcutoff = float(tokens["enmcutoff"])
 
                 ct = ComponentType(
-                    name=name, 
-                    pdb=pdb, 
-                    getsasa=getsasa, 
-                    domainsel=domainsel, 
+                    name=name,
+                    pdb=pdb,
+                    getsasa=getsasa,
+                    domainsel=domainsel,
                     getdomains=getdomains,
                     getenm=getenm,
                     enmcutoff=enmcutoff,
-                   )
+                )
 
                 comps[name] = ct
         finally:
@@ -343,6 +335,7 @@ class ComponentType:
                 fh.close()
 
         return comps
+
 
 @dataclass
 class Component:
@@ -352,11 +345,15 @@ class Component:
     def __repr__(self) -> str:
         return f"<component {self.ctype.name!r} with segments {self.segment}>"
 
+
 @dataclass
 class Interaction:
     pairs: list[tuple[int, int]] = field(default_factory=list)  # global CA indices (i, j)
-    strength: float = 1.0   # force constant (computed from probability)
-    distance: float = 0.8   # reference distance [nm]
+    strength: float = 1.0  # force constant (computed from probability)
+    distance: float = 0.8  # reference distance [nm]
+    additive: bool = True  # pairs are additive
+    function: str = "switch"  # 'switch', 'Go', 'harmonic'
+    parameter: float = 0.0  # extra parameter depending on function
 
 
 @dataclass
@@ -366,9 +363,10 @@ class InteractionSet:
 
     interactions: Optional[list[Interaction]] = field(default_factory=list)
 
-    mode: Optional[str] = 'all'          # 'all' or 'exclusive'
-    potential: Optional[str] = 'switch'  # 'Go', 'harmonic', 'switch'
-    value: Optional[str] = 'asis'        # 'asis', 'logit', 'neglog'
+    mode: Optional[str] = "additive"  # 'additive' or 'exclusive'
+    function: Optional[str] = "switch"  # 'Go', 'harmonic', 'switch'
+    parameter: Optional[float] = 0.0  # extra parameter depending on function
+    value: Optional[str] = "asis"  # 'asis', 'logit', 'neglog'
     scale: Optional[float] = 1.0
     offset: Optional[float] = 0.0
 
@@ -386,27 +384,29 @@ class InteractionSet:
     def __post_init__(self) -> None:
         # Parse options (robust, but minimal)
         if self.options:
-            for s in (x.strip() for x in self.options.split(',')):
+            for s in (x.strip() for x in self.options.split(",")):
                 if not s:
                     continue
                 name, val = _parse_option_value(s)
-                if name == 'exclusive':
-                    self.mode = 'exclusive'
-                elif name == 'all':
-                    self.mode = 'all'
-                elif name.lower() == 'switch':
-                    self.potential = 'switch'
-                elif name.lower() == 'go':
-                    self.potential = 'Go'
-                elif name.lower() == 'harmonic':
-                    self.potential = 'harmonic'
-                elif name in ('asis', 'logit', 'neglog'):
+                if name == "exclusive":
+                    self.mode = "exclusive"
+                elif name == "additive" or name == "all":
+                    self.mode = "additive"
+                elif name.lower() == "switch":
+                    self.function = "switch"
+                    self.parameter = float(val)
+                elif name.lower() == "go":
+                    self.function = "Go"
+                    self.parameter = float(val)
+                elif name.lower() == "harmonic":
+                    self.function = "harmonic"
+                    self.parameter = float(val)
+                elif name in ("asis", "logit", "neglog"):
                     self.value = name
-                    if val != 0.0:
-                        self.offset = float(val)
-                elif name == 'distance' and val > 0:
+                    self.offset = float(val)
+                elif name == "distance" and val > 0:
                     self.defdist = float(val)
-                elif name in ('prob', 'probability') and val > 0:
+                elif name in ("prob", "probability") and val > 0:
                     self.defprob = float(val)
 
         if self.contacttable:
@@ -488,6 +488,9 @@ class InteractionSet:
                             pairs=sorted(pair_set),
                             strength=strength,
                             distance=float(dist),
+                            additive=(self.mode == "additive"),
+                            function=self.function,
+                            parameter=self.parameter,
                         )
                     )
         finally:
@@ -504,10 +507,11 @@ class InteractionSet:
         prob: Optional[float]
         dist: Optional[float]
 
-    def _parse_column(self, col: str, *, lineno: int) -> "_ColSpec":
+    def _parse_column(self, col: str, *, lineno: int) -> _ColSpec:
         parts = [p for p in col.split(",") if p != ""]
         if len(parts) < 2:
-            raise ValueError(f"contact table line {lineno}: need at least two fields 'A,B[,prob[,dist]]'")
+            msg = f"contact table line {lineno}: need at least two fields 'A,B[,prob[,dist]]'"
+            raise ValueError(msg)
         selA = parts[0].strip()
         selB = parts[1].strip()
         prob = float(parts[2]) if len(parts) >= 3 else None
@@ -517,8 +521,8 @@ class InteractionSet:
     # Helper: selection -> all (i,j) combinations
     def _pairs_from_selections(self, selA: str, selB: str) -> list[tuple[int, int]]:
         # DomainSelector(...).atom_lists(model) returns lists of residue indices per selection.
-        listsA = DomainSelector(selA).atom_lists(self.ctypeA.model)
-        listsB = DomainSelector(selB).atom_lists(self.ctypeB.model)
+        listsA = DomainSelector(selA).atom_lists(self.ctypeA.model.select_CA())
+        listsB = DomainSelector(selB).atom_lists(self.ctypeB.model.select_CA())
 
         pairs: list[tuple[int, int]] = []
         for la in listsA or []:
@@ -526,7 +530,7 @@ class InteractionSet:
                 for i in la:
                     for j in lb:
                         if i == j and self.ctypeA is self.ctypeB:
-                            # allow same-index across different components; 
+                            # allow same-index across different components;
                             # skip strict self-self within identical model indexing
                             pass
                         pairs.append((int(i), int(j)))
@@ -537,11 +541,11 @@ class InteractionSet:
         # guard against exact 0/1 for log/ratio
         eps = 1e-12
         x = float(p)
-        if self.value == 'logit':
+        if self.value == "logit":
             x = log(min(max(p, eps), 1.0 - eps) / max(1.0 - p, eps))
-        elif self.value == 'neglog':
+        elif self.value == "neglog":
             x = -log(max(p, eps))
-        elif self.value == 'asis':
+        elif self.value == "asis":
             x = p
         else:
             # fallback to 'asis' if unknown
@@ -549,10 +553,9 @@ class InteractionSet:
         y = (x + float(self.offset)) * float(self.scale)
         return y if y > 0.0 else 0.0
 
-
     @staticmethod
     def read_list(
-        ctypes: dict[str, ComponentTypes], 
+        ctypes: dict[str, ComponentType],
         path: Union[FileLike | Path | str] = "interactions",
         *,
         dir: Union[str | Path] = ".",
@@ -592,40 +595,46 @@ class InteractionSet:
                 if tag2 not in ctypes:
                     raise ValueError(f"{tag2} not in component types")
 
+                ptable = Path(ftable)
+                if not ptable.is_file() and not ptable.is_absolute():
+                    ptable = base / ptable
+
                 if len(parts) > 3:
-                    options=parts[3]
+                    options = parts[3]
                 else:
-                    options=None
+                    options = None
 
                 intset = InteractionSet(
                     ctypeA=ctypes[tag1],
                     ctypeB=ctypes[tag2],
-                    contacttable=ftable,
+                    contacttable=ptable,
                     options=options,
-                   )
+                )
 
-                key=f'{tag1}.{tag2}'
+                key = f"{tag1}.{tag2}"
                 ints[key] = intset
         finally:
             if need_close:
                 fh.close()
 
-        return ints 
+        return ints
 
 
 @dataclass
 class Assembly:
     component: list[Component] = field(default_factory=list)
-    ctype: dict[str, ComponentType] = field(default_factory=dict)  # name -> type
-    interaction: list[Interaction] = field(default_factory=list)
+    ctype: dict[str, ComponentType] = field(default_factory=dict)
+    interact: dict[str, InteractionSet] = field(default_factory=dict)
     model: Union[Structure, Model, None] = None
 
+    # data structures for precomputing globally mapped values
     sasa: list[float] = field(default_factory=list)
     domains: list[list[int]] = field(default_factory=list)
+    interactions: list[int] = field(default_factory=list)
 
     def __repr__(self) -> str:
-        msg=f"<assembly has {len(self.component)} components, {len(self.ctype)} types"
-        msg+=f" and {len(self.interaction)} interaction sets>"
+        msg = f"<assembly has {len(self.component)} components, {len(self.ctype)} types"
+        msg += f" and {len(self.interact)} interaction sets>"
         return msg
 
     __str__ = __repr__
@@ -646,11 +655,12 @@ class Assembly:
         """
         self.component = []
         self.ctype = {}  # dict[str, ComponentType]
-        self.interaction = []
+        self.interact = {}
         self.model = None
         self.sasa = []
         self.domains = []
         self.enmpairs = []
+        self.interactions = []
 
         if (components is None) ^ (types is None):
             raise ValueError("Provide both components and types file names, or neither.")
@@ -665,7 +675,7 @@ class Assembly:
                 if _is_fileobj(structure):
                     self.model = PDBReader(structure).models[0].select_CA()
                 else:
-                    spath=Path(structure)
+                    spath = Path(structure)
                     if not spath.is_absolute():
                         spath = Path(dir) / spath
                     _ensure_readable(spath)
@@ -686,6 +696,11 @@ class Assembly:
         # insert or keep existing by name
         if ctype.name not in self.ctype:
             self.ctype[ctype.name] = ctype
+
+    def add_interactions(self, intset: dict[str, InteractionSet]) -> None:
+        for k in intset.keys():
+            if k not in self.interact:
+                self.interact[k] = intset[k]
 
     def add_component(self, comp: Component) -> None:
         self.add_type(comp.ctype)
@@ -712,8 +727,18 @@ class Assembly:
         self,
         inter_file: FileLike,
         *,
-        dir: Union[str,Path] = ".",
+        dir: Union[str, Path] = ".",
     ) -> None:
+        base = Path(dir)
+        if _is_fileobj(inter_file):
+            inter_source = inter_file
+            self.add_interactions(InteractionSet.read_list(self.ctype, inter_source, dir=base))
+        else:
+            inter_path = Path(inter_file)
+            if not inter_path.is_absolute():
+                inter_path = base / inter_path
+            _ensure_readable(inter_path)
+            self.add_interactions(InteractionSet.read_list(self.ctype, inter_path, dir=base))
         return
 
     def read_components(
@@ -822,6 +847,18 @@ class Assembly:
         if not self.enmpairs or len(self.enmpairs) == 0:
             self._global_enmpairs(mol=mol)
         return self.enmpairs
+
+    def get_interactions(
+        self,
+        *,
+        mol: Union[Structure, Model, None] = None,
+    ) -> list[Interaction]:
+        """
+        Returns global interaction pair list combined from components
+        """
+        if not self.interactions or len(self.interactions) == 0:
+            self._global_interactions(mol=mol)
+        return self.interactions
 
     # -- helper: build ordered segment info for a component (only those present) --
     @staticmethod
@@ -954,6 +991,119 @@ class Assembly:
 
         self.enmpairs = pairs
 
+    def _global_interactions(
+        self,
+        *,
+        mol: Union[Structure, Model, None] = None,
+    ) -> None:
+        model = self._ensure_model(mol)
+        seg_offsets, total = self._seg_offsets(model)
+
+        interactions: list[Interaction] = []
+        if total == 0 or not self.interact:
+            self.interactions = interactions
+            return
+
+        # Collect per-component mapping functions grouped by type name,
+        # preserving component instance order.
+        # Each entry is (comp_index, map_idx_callable)
+
+        def _make_map_fn(seginfo) -> Callable[[int], int]:
+            def map_fn(i: int) -> int:
+                return Assembly._map_component_index(int(i), seginfo)
+
+            return map_fn
+
+        maps_by_type: dict[str, list[tuple[int, Callable[[int], int]]]] = {}
+
+        comp_idx = -1
+        for comp in self.component:
+            # build seginfo only for components actually present
+            seginfo = Assembly._comp_seginfo(comp.segment, seg_offsets)
+            if not seginfo:
+                continue
+            comp_idx += 1
+
+            map_fn = _make_map_fn(seginfo)  # early-bind seginfo, no lambda assignment
+            maps_by_type.setdefault(comp.ctype.name, []).append((comp_idx, map_fn))
+
+        #        maps_by_type: dict[str, list[tuple[int, callable]]] = {}
+        #        comp_idx = -1
+        #        for comp in self.component:
+        #            # build seginfo only for components actually present
+        #            seginfo = Assembly._comp_seginfo(comp.segment, seg_offsets)
+        #            if not seginfo:
+        #                continue
+        #            comp_idx += 1
+        #
+        #            map_fn = (lambda i, seginfo=seginfo: Assembly._map_component_index(int(i), seginfo))
+        #            maps_by_type.setdefault(comp.ctype.name, []).append((comp_idx, map_fn))
+
+        # For each defined InteractionSet, expand to all present component pairs
+        # of the corresponding types. For identical types, use combinations (i<j).
+        for intset in self.interact.values():
+            if not intset or not intset.ctypeA or not intset.ctypeB:
+                continue
+
+            nameA = intset.ctypeA.name
+            nameB = intset.ctypeB.name
+
+            listA = maps_by_type.get(nameA, [])
+            listB = maps_by_type.get(nameB, [])
+            if not listA or not listB:
+                continue
+
+            if nameA == nameB:
+                # same-type interactions: exclude self by pairing distinct instances only
+                comp_pairs = [
+                    (a_idx, a_map, b_idx, b_map)
+                    for (a_idx, a_map), (b_idx, b_map) in combinations(listA, 2)
+                ]
+            else:
+                # cross-type interactions: full Cartesian product
+                comp_pairs = [
+                    (a_idx, a_map, b_idx, b_map)
+                    for (a_idx, a_map) in listA
+                    for (b_idx, b_map) in listB
+                ]
+
+            if not comp_pairs:
+                continue
+
+            # Ensure we have template interactions from the set
+            templates = intset.interactions or []
+            if not templates:
+                continue
+
+            # Map each template Interaction's local pairs (i,j) to global indices
+            for a_idx, mapA, b_idx, mapB in comp_pairs:
+                for tmpl in templates:
+                    pair_set: set[tuple[int, int]] = set()
+                    for i_local, j_local in tmpl.pairs or []:
+                        gi = mapA(i_local)
+                        gj = mapB(j_local)
+                        if gi is None or gj is None:
+                            continue
+                        # gi==gj cannot happen across distinct components; retain check anyway
+                        if gi == gj:
+                            continue
+                        pair_set.add((int(gi), int(gj)))
+
+                    if not pair_set:
+                        continue
+
+                    interactions.append(
+                        Interaction(
+                            pairs=sorted(pair_set),
+                            strength=float(tmpl.strength),
+                            distance=float(tmpl.distance),
+                            additive=bool(tmpl.additive),
+                            function=str(tmpl.function),
+                        )
+                    )
+
+        self.interactions = interactions
+
     def _global_sasa(
         self,
         *,
@@ -1002,6 +1152,7 @@ def _ensure_readable(f: FileLike) -> None:
     if not p.is_file():
         raise FileNotFoundError(p)
 
+
 def _parse_line(line: str) -> dict[str, str]:
     """
     Parse a line of space-separated tokens into a dict.
@@ -1018,7 +1169,7 @@ def _parse_line(line: str) -> dict[str, str]:
     {'tag': 'onlytag'}
     """
     tokens = shlex.split(line, posix=True)
-    out: Dict[str, str] = {}
+    out: dict[str, str] = {}
     if not tokens:
         return out
 
@@ -1033,6 +1184,7 @@ def _parse_line(line: str) -> dict[str, str]:
         k, v = tok.split("=", 1)
         out[k] = v
     return out
+
 
 def _parse_option_value(s: str) -> tuple[str, float]:
     s = s.strip()

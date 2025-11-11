@@ -782,7 +782,9 @@ class DomainSelector:
 
     # --------------------------- internals ------------------------------------
 
-    def _resolve_residues_for_terms(self, model: Model, terms: tuple[Term, ...]) -> dict[str, set[int]]:
+    def _resolve_residues_for_terms(
+        self, model: Model, terms: tuple[Term, ...]
+    ) -> dict[str, set[int]]:
         """As _resolve_residues(), but for an explicit term group."""
         # Collect alias universe
         all_aliases: set[str] = set()
@@ -874,7 +876,6 @@ class DomainSelector:
         if not terms:
             raise SelectionError(f"Could not parse spec '{group_spec}'")
         return tuple(terms)
-
 
 
 # ----------------------------- helpers ---------------------------------------
