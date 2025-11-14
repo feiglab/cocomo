@@ -766,7 +766,9 @@ class COCOMO:
             if func == "switch":
                 # Create the force on first use
                 if switch_force is None:
-                    equation = "-eps/(1+exp(alpha*(r-r0)))"
+                    equation = "-eps/(1+exp(y)); "
+                    equation += "y = min(max(x, -50), 50); "
+                    equation += "x = alpha*(r-r0);"
                     f = CustomBondForce(equation)
                     f.addPerBondParameter("eps")  # energy
                     f.addPerBondParameter("r0")  # nm
