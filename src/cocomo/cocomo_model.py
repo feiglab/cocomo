@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import combinations
@@ -707,29 +708,149 @@ class COCOMO:
             self.forces["enm"] = force
             self.system.addForce(force)
 
-    def _make_switch_sumlog_force(
-        self, pairs, r0: float, alpha: float, eps: float
-    ) -> CustomBondForce:
-        # sum_i [-log(1 - S_i + eps)], S(r) = 1/(1+exp(alpha*(r-r0)))
-        f = CustomBondForce("-log( 1.0 - ( 1.0/(1.0 + exp(alpha*(r - r0))) ) + eps )")
-        f.addGlobalParameter("alpha", float(alpha))
-        f.addGlobalParameter("eps", float(eps))
-        f.addPerBondParameter("r0")
-        rr0 = float(r0)
-        for i, j in pairs:
-            f.addBond(int(i), int(j), [rr0])
-        return f
-
     def setupInteractionForce(self) -> None:
         """
-        Build 'switch' interactions with minimal memory:
-          - Additive groups coalesced by (strength,r0,alpha) into one CustomBondForce each.
-          - Non-additive groups packed into aggregator CV forces (≤32 groups per aggregator).
-          - No sharding unless a single non-additive group exceeds max_bonds_per_force.
+        Build CustomBondForce objects for pairwise interactions specified in
+        self.interactions (a list[Interaction] from system_handling).
+
+        Implemented forms:
+
+        - 'switch':
+              V(r) = -eps / (1 + exp(alpha*(r - r0)))
+          where:
+              eps   ← Interaction.strength (energy scale)
+              r0    ← Interaction.distance [nm]
+              alpha ← Interaction.parameter if non-zero, else a default
+
+        - 'Go':
+              V(r) = eps * ((r0/r)**12 - 2*(r0/r)**6)
+          minimum at r = r0 with depth -eps.
+
+        - 'harmonic':
+              V(r) = 0.5 * k * (r - r0)**2
+          where k ← Interaction.strength (force constant).
+
+        All varying quantities are per-bond parameters; we use at most one
+        CustomBondForce per functional form to avoid the global-parameter
+        conflict that triggered the 'eps' error.
         """
         if self.topology is None or not self.interactions:
             return
-        return
+
+        # Default alpha (1/nm) for switched potential if parameter == 0.0
+        def_alpha = 10.0
+
+        # Lazily created forces, one per functional form
+        switch_force = None
+        go_force = None
+        harmonic_force = None
+
+        for intr in self.interactions:
+            if not intr.pairs:
+                continue
+
+            func = (intr.function or "switch").lower()
+            strength = float(intr.strength)
+            r0 = float(intr.distance)
+
+            if func == "switch":
+                # Create the force on first use
+                if switch_force is None:
+                    equation = "-eps/(1+exp(alpha*(r-r0)))"
+                    f = CustomBondForce(equation)
+                    f.addPerBondParameter("eps")  # energy
+                    f.addPerBondParameter("r0")  # nm
+                    f.addPerBondParameter("alpha")  # 1/nm
+                    f.setName("interaction_switch")
+                    switch_force = f
+
+                # Choose alpha: interaction.parameter if non-zero, else default
+                alpha = float(intr.parameter) if intr.parameter not in (None, 0.0) else def_alpha
+
+                for i, j in intr.pairs:
+                    if i == j:
+                        continue
+                    ia, jb = (int(i), int(j))
+                    # consistent ordering is not strictly needed for bonds but doesn’t hurt
+                    if ia > jb:
+                        ia, jb = jb, ia
+
+                    switch_force.addBond(
+                        ia,
+                        jb,
+                        [
+                            strength * kilojoule / mole,
+                            r0 * nanometer,
+                            alpha / nanometer,
+                        ],
+                    )
+
+            elif func == "go":
+                if go_force is None:
+                    equation = "eps*((r0/r)^12 - 2*(r0/r)^6)"
+                    f = CustomBondForce(equation)
+                    f.addPerBondParameter("eps")  # energy
+                    f.addPerBondParameter("r0")  # nm
+                    f.setName("interaction_go")
+                    go_force = f
+
+                for i, j in intr.pairs:
+                    if i == j:
+                        continue
+                    ia, jb = (int(i), int(j))
+                    if ia > jb:
+                        ia, jb = jb, ia
+
+                    go_force.addBond(
+                        ia,
+                        jb,
+                        [
+                            strength * kilojoule / mole,
+                            r0 * nanometer,
+                        ],
+                    )
+
+            elif func == "harmonic":
+                if harmonic_force is None:
+                    equation = "0.5*k*(r-r0)^2"
+                    f = CustomBondForce(equation)
+                    f.addPerBondParameter("k")  # energy / nm^2
+                    f.addPerBondParameter("r0")  # nm
+                    f.setName("interaction_harmonic")
+                    harmonic_force = f
+
+                for i, j in intr.pairs:
+                    if i == j:
+                        continue
+                    ia, jb = (int(i), int(j))
+                    if ia > jb:
+                        ia, jb = jb, ia
+
+                    harmonic_force.addBond(
+                        ia,
+                        jb,
+                        [
+                            strength * kilojoule / (mole * nanometer**2),
+                            r0 * nanometer,
+                        ],
+                    )
+
+            else:
+                warnings.warn(f"Unknown interaction function {intr.function!r}; skipping.")
+                continue
+
+        # Register forces with the System and self.forces dict
+        if switch_force is not None:
+            self.system.addForce(switch_force)
+            self.forces["interaction_switch"] = switch_force
+
+        if go_force is not None:
+            self.system.addForce(go_force)
+            self.forces["interaction_go"] = go_force
+
+        if harmonic_force is not None:
+            self.system.addForce(harmonic_force)
+            self.forces["interaction_harmonic"] = harmonic_force
 
     def setupCMMotionRemover(self) -> None:
         if self.topology is not None and self.removecmmotion:

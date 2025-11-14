@@ -9,3 +9,6 @@ devreadme
 .env
 notebooks/
 .ipynb_checkpoints/
+plugins/
+.github/workflows/capppairs-wheels.yml
+src/cocomo/_plugin.py
