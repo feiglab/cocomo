@@ -23,6 +23,7 @@ from openmm import (
 )
 from openmm.app import (
     DCDReporter,
+    PDBFile,
     Simulation,
     StateDataReporter,
 )
@@ -303,6 +304,11 @@ class COCOMO:
     def read_state(self, fname="state.xml"):
         if self.simulation is not None:
             self.simulation.loadState(fname)
+
+    def write_pdb(self, fname="state.pdb"):
+        positions = self.simulation.context.getState(getPositions=True).getPositions()
+        with open(fname, "w") as f:
+            PDBFile.writeFile(self.simulation.topology, positions, f)
 
     def get_potentialEnergy(self):
         if self.simulation is not None:
