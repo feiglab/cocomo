@@ -441,18 +441,22 @@ class COCOMO:
     def setup_box(self, box) -> None:
         ax_nm, by_nm, cz_nm = self._normalize_box_nm(box)
 
-        a = Vec3(ax_nm, 0.0, 0.0) * nanometer
-        b = Vec3(0.0, by_nm, 0.0) * nanometer
-        c = Vec3(0.0, 0.0, cz_nm) * nanometer
+        a_sys = Vec3(ax_nm, 0.0, 0.0) * nanometer
+        b_sys = Vec3(0.0, by_nm, 0.0) * nanometer
+        c_sys = Vec3(0.0, 0.0, cz_nm) * nanometer
+
+        a_top = Vec3(ax_nm, 0.0, 0.0)
+        b_top = Vec3(0.0, by_nm, 0.0)
+        c_top = Vec3(0.0, 0.0, cz_nm)
 
         # record on the class
         self.box_nm: tuple[float, float, float] = (ax_nm, by_nm, cz_nm)
-        self.box_vectors = (a, b, c)
+        self.box_vectors = (a_sys, b_sys, c_sys)
 
         # set on topology and system
         if self.topology is not None:
-            self.topology.setPeriodicBoxVectors(self.box_vectors)
-        self.system.setDefaultPeriodicBoxVectors(a, b, c)
+            self.topology.setPeriodicBoxVectors((a_top, b_top, c_top))
+        self.system.setDefaultPeriodicBoxVectors(a_sys, b_sys, c_sys)
 
     def setup_forces(self) -> None:
         self.forces = {}

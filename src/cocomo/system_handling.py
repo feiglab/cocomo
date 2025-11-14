@@ -1087,6 +1087,7 @@ class Assembly:
                             distance=float(tmpl.distance),
                             additive=bool(tmpl.additive),
                             function=str(tmpl.function),
+                            parameter=float(tmpl.parameter),
                         )
                     )
 
