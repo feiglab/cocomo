@@ -408,6 +408,8 @@ class InteractionSet:
                     self.defdist = float(val)
                 elif name in ("prob", "probability") and val > 0:
                     self.defprob = float(val)
+                elif name == "scale" and val > 0:
+                    self.scale = float(val)
 
         if self.contacttable:
             self.interactions = self._read_contact_table(self.contacttable)
