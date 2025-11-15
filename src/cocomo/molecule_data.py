@@ -833,9 +833,21 @@ class DomainSelector:
         """
         Return a list of term tuples. Each element of an iterable input is a separate group.
         For a single string input, commas/whitespace split terms within one group.
+
+        Extended behavior:
+          - For a single string, ';' and '_' split into separate groups, as if a list of
+            strings had been passed.
         """
         if isinstance(spec, str):
-            return [DomainSelector._parse_terms(spec)]
+            # Treat ';' and '_' as group separators when given a single string spec
+            raw_groups = re.split(r"[;_]+", spec)
+            groups: list[tuple[Term, ...]] = []
+            for s in raw_groups:
+                if not isinstance(s, str) or not s.strip():
+                    continue
+                groups.append(DomainSelector._parse_terms(s))
+            return groups
+
         # Iterable of group strings
         groups: list[tuple[Term, ...]] = []
         for s in spec:
@@ -847,8 +859,8 @@ class DomainSelector:
     @staticmethod
     def _parse_terms(group_spec: str) -> tuple[Term, ...]:
         terms: list[Term] = []
-        # split on commas and/or whitespace (multiple allowed)
-        for raw_term in re.split(r"[,\s]+", group_spec.strip()):
+        # split on commas, whitespace, or '+' (multiple allowed)
+        for raw_term in re.split(r"[,\s+]+", group_spec.strip()):
             t = raw_term.strip()
             if not t:
                 continue
