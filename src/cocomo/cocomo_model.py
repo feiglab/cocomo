@@ -773,6 +773,7 @@ class COCOMO:
                     f.addPerBondParameter("eps")  # energy
                     f.addPerBondParameter("r0")  # nm
                     f.addPerBondParameter("alpha")  # 1/nm
+                    f.setUsesPeriodicBoundaryConditions(True)
                     f.setName("interaction_switch")
                     switch_force = f
 
@@ -803,6 +804,7 @@ class COCOMO:
                     f = CustomBondForce(equation)
                     f.addPerBondParameter("eps")  # energy
                     f.addPerBondParameter("r0")  # nm
+                    f.setUsesPeriodicBoundaryConditions(True)
                     f.setName("interaction_go")
                     go_force = f
 
@@ -828,6 +830,7 @@ class COCOMO:
                     f = CustomBondForce(equation)
                     f.addPerBondParameter("k")  # energy / nm^2
                     f.addPerBondParameter("r0")  # nm
+                    f.setUsesPeriodicBoundaryConditions(True)
                     f.setName("interaction_harmonic")
                     harmonic_force = f
 
