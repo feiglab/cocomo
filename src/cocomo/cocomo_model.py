@@ -391,6 +391,7 @@ class COCOMO:
         gamma=0.01,
         tstep=0.01,
         resources="CPU",
+        device=0,
         positions=None,
         restart=None,
     ) -> None:
@@ -411,7 +412,7 @@ class COCOMO:
         self.platform = Platform.getPlatformByName(self.resources)
         self.simulation = None
         if self.resources == "CUDA":
-            prop = dict(CudaPrecision="mixed")
+            prop = dict(CudaPrecision="mixed", CudaDeviceIndex=str(device))
             self.simulation = Simulation(
                 self.topology, self.system, self.integrator, self.platform, prop
             )
