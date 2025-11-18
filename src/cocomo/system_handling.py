@@ -41,13 +41,16 @@ class ComponentType:
 
     pdb: Optional[FileLike] = None  # reference PDB file
 
-    getsasa: Optional[FileLike] = None  # read SASA from file, calculat if 'auto'
+    getsasa: Optional[FileLike] = None  # read SASA from file, calculate if 'auto'
 
     domainsel: Optional[str] = None  # domain selection from string
     getdomains: Optional[FileLike] = None  # read domain lists from file
 
     getenm: Optional[FileLike] = None  # read ENM pairs from file, calculate if 'auto'
     enmcutoff: Optional[float] = None  # in nm, default is 0.9
+
+    mask_sasa_bydomain: Optional[bool] = True  # mask SASA values outside domain
+    default_sasa: Optional[float] = 999.0  # default SASA value
 
     def __repr__(self) -> str:
         r = f"<component type {self.name!r} with {self.nunit} units"
@@ -64,19 +67,6 @@ class ComponentType:
             s = PDBReader(self.pdb)
             self.model = s[0]
 
-        if self.getsasa is not None and len(self.sasa) == 0:
-            if self.getsasa == "auto":
-                if self.model is None:
-                    raise ValueError("Reference structure needed for SASA calculation")
-                mca = self.model.select_CA()
-                if mca.natoms() == self.model.natoms():
-                    raise ValueError("Cannot calculate SASA from C-alpha coordinates")
-                self.sasa = self.model.sasa_by_residue(n_sphere_points=1920)
-            else:
-                _ensure_readable(self.getsasa)
-                self.sasa = ComponentType._read_sasa_table(self.getsasa)
-            self.sasa = self._coerce_sasa_pairs(self.sasa)
-
         if self.getdomains is not None and len(self.domainres) == 0:
             _ensure_readable(self.getdomains)
             self.domainres = np.loadtxt(self.getdomains, dtype=int, ndmin=2).tolist()
@@ -86,6 +76,26 @@ class ComponentType:
                 raise ValueError("Reference structure needed for domain selection")
             mca = self.model.select_CA()
             self.domainres = DomainSelector(self.domainsel).atom_lists(mca)
+
+        if self.getsasa is not None and len(self.sasa) == 0:
+            if self.getsasa == "auto":
+                if self.model is None:
+                    raise ValueError("Reference structure needed for SASA calculation")
+                mca = self.model.select_CA()
+                if mca.natoms() == self.model.natoms():
+                    raise ValueError("Cannot calculate SASA from C-alpha coordinates")
+                self.sasa = self.model.sasa_by_residue(n_sphere_points=1920)
+                if self.mask_sasa_bydomain:
+                    if self.domainres and len(self.domainres) > 0:
+                        keep: set[int] = {i for lst in self.domainres for i in lst}
+                        if keep:
+                            for i in range(len(self.sasa)):
+                                if i not in keep:
+                                    self.sasa[i] = float(self.default_sasa)
+            else:
+                _ensure_readable(self.getsasa)
+                self.sasa = ComponentType._read_sasa_table(self.getsasa)
+            self.sasa = self._coerce_sasa_pairs(self.sasa)
 
         if self.getenm is not None:
             if self.getenm == "auto":
@@ -1102,6 +1112,7 @@ class Assembly:
         mask_by_domain: bool = False,
         default_sasa: float = 999.0,
     ) -> None:
+        #        print(f"global_sasa mask: {mask_by_domain}")
         model = self._ensure_model(mol)
         seg_offsets, total = self._seg_offsets(model)
 
@@ -1119,13 +1130,14 @@ class Assembly:
         if mask_by_domain:
             if not self.domains:
                 self._global_domains(mol=model)
-            keep: set[int] = {i for lst in self.domains for i in lst}
-            if keep:
-                for i in range(total):
-                    if i not in keep:
-                        sasa[i] = float(default_sasa)
-            else:
-                sasa = [float(default_sasa)] * total
+            if self.domains and len(self.domains) > 0:
+                keep: set[int] = {i for lst in self.domains for i in lst}
+                if keep:
+                    for i in range(total):
+                        if i not in keep:
+                            sasa[i] = float(default_sasa)
+                else:
+                    sasa = [float(default_sasa)] * total
 
         self.sasa = sasa
 

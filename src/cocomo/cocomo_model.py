@@ -715,9 +715,9 @@ class COCOMO:
                 for enm in self.enmpairs:
                     force.addBond(enm[0], enm[1], [enm[2]])
 
-            force.setName("enm")
-            self.forces["enm"] = force
-            self.system.addForce(force)
+                force.setName("enm")
+                self.forces["enm"] = force
+                self.system.addForce(force)
 
     def setupInteractionForce(self) -> None:
         """
