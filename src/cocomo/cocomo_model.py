@@ -7,8 +7,6 @@ from itertools import combinations
 from math import copysign, sqrt
 from types import MappingProxyType
 
-from .__version__ import __version__
-
 import numpy as np
 from openmm import (
     CMMotionRemover,
@@ -41,6 +39,8 @@ from openmm.unit import (
     picoseconds,
     radian,
 )
+
+from .__version__ import __version__
 
 # --- Data containers ---------------------------------------------------------
 
