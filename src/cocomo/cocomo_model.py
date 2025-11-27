@@ -7,6 +7,8 @@ from itertools import combinations
 from math import copysign, sqrt
 from types import MappingProxyType
 
+from .__version__ import __version__
+
 import numpy as np
 from openmm import (
     CMMotionRemover,
@@ -287,7 +289,7 @@ class COCOMO:
         self.setup_forces()
 
     def describe(self) -> str:
-        return f"This is COCOMO CG model version {self.version}"
+        return f"This is COCOMO CG model simulator version {__version__}"
 
     def write_system(self, fname="system.xml"):
         with open(fname, "w") as file:
