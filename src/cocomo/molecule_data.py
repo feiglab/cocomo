@@ -551,7 +551,7 @@ def _parse_atom_line(line: str) -> Atom:
     name = line[12:16].strip()
     resname = line[17:21].strip()
     chain = (line[21] if len(line) >= 22 else " ").strip()
-    resnum = _safe_int(line[22:26], required=True)
+    resnum = _safe_int(line[22:27], required=True)
     x = _safe_float(line[30:38], required=True)
     y = _safe_float(line[38:46], required=True)
     z = _safe_float(line[46:54], required=True)
