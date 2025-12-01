@@ -10,17 +10,16 @@ from pathlib import Path
 from typing import Callable, Optional, Union
 
 import numpy as np
+from mdsim import (
+    Model,
+    PDBReader,
+    Structure,
+    StructureSelector,
+)
 from openmm.unit import (
     Quantity,
     nanometer,
     norm,
-)
-
-from cocomo import (
-    DomainSelector,
-    Model,
-    PDBReader,
-    Structure,
 )
 
 FileLike = Union[str, Path, io.BytesIO, io.StringIO]
@@ -75,7 +74,7 @@ class ComponentType:
             if self.model is None:
                 raise ValueError("Reference structure needed for domain selection")
             mca = self.model.select_CA()
-            self.domainres = DomainSelector(self.domainsel).atom_lists(mca)
+            self.domainres = StructureSelector(self.domainsel).atom_lists(mca)
 
         if self.getsasa is not None and len(self.sasa) == 0:
             if self.getsasa == "auto":
@@ -532,9 +531,9 @@ class InteractionSet:
 
     # Helper: selection -> all (i,j) combinations
     def _pairs_from_selections(self, selA: str, selB: str) -> list[tuple[int, int]]:
-        # DomainSelector(...).atom_lists(model) returns lists of residue indices per selection.
-        listsA = DomainSelector(selA).atom_lists(self.ctypeA.model.select_CA())
-        listsB = DomainSelector(selB).atom_lists(self.ctypeB.model.select_CA())
+        # StructureSelector(...).atom_lists(model) returns lists of residue indices per selection.
+        listsA = StructureSelector(selA).atom_lists(self.ctypeA.model.select_CA())
+        listsB = StructureSelector(selB).atom_lists(self.ctypeB.model.select_CA())
 
         pairs: list[tuple[int, int]] = []
         for la in listsA or []:
