@@ -20,7 +20,7 @@ dependencies = [
   "numpy>=2.0; python_version>='3.10'",
   "openmm>=8.0",
   "mdtraj>=1.9.0",
-  "mdsim>=1.0.0",
+  "mdsim @ git+https://github.com/feiglab/mdsim.git",
 ]  
 
 [project.optional-dependencies]
@@ -50,3 +50,5 @@ ignore = ["UP007", "UP045"]
 [tool.ruff.lint]
 ignore = ["UP007", "UP045"]
 
+[tool.hatch.metadata]
+allow-direct-references = true
