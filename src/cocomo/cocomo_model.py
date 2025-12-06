@@ -230,7 +230,10 @@ class COCOMO:
         self,
         topology=None,
         *,
-        version=None,
+        version=None,  # version: 1 or 2
+        params=None,  # default set from version
+        eps=None,  # default set from version
+        surfscale=None,  # default set from version
         box=100,  # 100 or (50,20,40), nm
         cuton=2.9,  # nm
         cutoff=3.1,  # nm
@@ -248,6 +251,10 @@ class COCOMO:
     ):
 
         self.simulation = None
+
+        self.params = params
+        self.eps = eps
+        self.surfscale = surfscale
 
         self.version = 2 if version is None else version
         self.set_params(self.version)
@@ -894,16 +901,21 @@ class COCOMO:
         return st.getPotentialEnergy()
 
     def set_params(self, version=None):
-        # default is version 2
-        self.params = RESIDUE_PARAMS_V2
-        self.eps = EPS_V2
-        self.surfscale = surf_scale_v2
-        if version is None:
-            return
-        if version == 1:
-            self.params = RESIDUE_PARAMS_V1
-            self.eps = EPS_V1
-            self.surfscale = None
+        if version is not None and version == 1:
+            if self.params is None:
+                self.params = RESIDUE_PARAMS_V1
+            if self.eps is None:
+                self.eps = EPS_V1
+            if self.surfscale is None:
+                self.surfscale = None
+        else:
+            # default is version 2
+            if self.params is None:
+                self.params = RESIDUE_PARAMS_V2
+            if self.eps is None:
+                self.eps = EPS_V2
+            if self.surfscale is None:
+                self.surfscale = surf_scale_v2
 
     def set_bonds(self):
         if self.topology is not None:
