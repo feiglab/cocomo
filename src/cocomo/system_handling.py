@@ -385,6 +385,8 @@ class InteractionSet:
     contacttable: Optional[str] = None
     options: Optional[str] = None
 
+    _contact_search_dirs: list[Path] = field(default_factory=list, repr=False)
+
     def __repr__(self) -> str:
         msg = f"<interaction set {self.ctypeA.name!r} - {self.ctypeB.name!r}"
         msg += f" with {len(self.interactions or [])} interactions>"
@@ -439,16 +441,24 @@ class InteractionSet:
             raise ValueError("Both component types must have reference models to build pairs")
 
         # open handle
-        base = Path(".")
         need_close = False
         if _is_fileobj(path):
             fh = path  # type: ignore[assignment]
         else:
             p = Path(path)
-            if not p.is_file() and not p.is_absolute():
-                p = base / p
-            _ensure_readable(p)
-            fh = p.open()  # type: ignore[assignment]
+
+            # Search order required by user:
+            #  - absolute (handled in resolver)
+            #  - relative to CWD
+            #  - relative to dir= passed to read_list (base)
+            #  - relative to directory containing the interactions file
+            search_dirs = list(self._contact_search_dirs) if self._contact_search_dirs else []
+            if not search_dirs:
+                search_dirs = [Path.cwd()]
+
+            resolved = _resolve_path_candidates(p, search_dirs)
+            _ensure_readable(resolved)
+            fh = resolved.open()  # type: ignore[assignment]
             need_close = True
 
         interactions: list[Interaction] = []
@@ -581,14 +591,17 @@ class InteractionSet:
         need_close = False
         if _is_fileobj(path):
             fh = path  # already-open file-like
+            interactions_file_dir = Path(dir)
         else:
             p = Path(path)
+
             if not p.is_file() and not p.is_absolute():
                 p = base / p
             if not p.is_file():
                 raise FileNotFoundError(f"interactions file not found: {p}")
             fh = p.open()
             need_close = True
+            interactions_file_dir = p.parent
 
         try:
             for ln, line in enumerate(fh, 1):
@@ -606,20 +619,25 @@ class InteractionSet:
                 if tag2 not in ctypes:
                     raise ValueError(f"{tag2} not in component types")
 
-                ptable = Path(ftable)
-                if not ptable.is_file() and not ptable.is_absolute():
-                    ptable = base / ptable
+                ptable = Path(ftable)  # keep raw; resolve later with full search logic
 
                 if len(parts) > 3:
                     options = parts[3]
                 else:
                     options = None
 
+                search_dirs = [
+                    Path.cwd(),  # relative to current directory
+                    base,  # relative to dir= passed to read_list
+                    interactions_file_dir,  # relative to interactions file location
+                ]
+
                 intset = InteractionSet(
                     ctypeA=ctypes[tag1],
                     ctypeB=ctypes[tag2],
                     contacttable=ptable,
                     options=options,
+                    _contact_search_dirs=search_dirs,
                 )
 
                 key = f"{tag1}.{tag2}"
@@ -1143,6 +1161,32 @@ class Assembly:
 
 def _is_fileobj(f) -> bool:
     return isinstance(f, (io.TextIOBase, io.BufferedIOBase, io.RawIOBase))
+
+
+def _resolve_path_candidates(p: Path, search_dirs: Sequence[Path]) -> Path:
+    """
+    Resolve `p` by trying:
+      - absolute p (as-is)
+      - then p relative to each directory in search_dirs (in order)
+    Returns the first existing file path, otherwise raises FileNotFoundError
+    with a helpful message.
+    """
+    if p.is_absolute():
+        if p.is_file():
+            return p
+        raise FileNotFoundError(p)
+
+    tried: list[Path] = []
+
+    # Try as provided relative to CWD (first search dir may be Path.cwd()).
+    for d in search_dirs:
+        cand = d / p
+        tried.append(cand)
+        if cand.is_file():
+            return cand
+
+    msg = "Contact table not found. Tried:\n" + "\n".join(f"  - {t}" for t in tried)
+    raise FileNotFoundError(msg)
 
 
 def _ensure_readable(f: FileLike) -> None:

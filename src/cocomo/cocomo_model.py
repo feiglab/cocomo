@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import os
 import warnings
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import combinations
-from math import copysign, sqrt
+from math import copysign, floor, pi, sqrt
 from types import MappingProxyType
 
+import mdtraj as md
 import numpy as np
 from openmm import (
     CMMotionRemover,
     CustomBondForce,
+    CustomCentroidBondForce,
+    CustomExternalForce,
     CustomNonbondedForce,
     HarmonicAngleForce,
     HarmonicBondForce,
@@ -26,6 +30,8 @@ from openmm.app import (
     PDBFile,
     Simulation,
     StateDataReporter,
+    Topology,
+    element,
 )
 from openmm.unit import (
     Quantity,
@@ -243,6 +249,7 @@ class COCOMO:
         enmpairs=None,  # list of ENM pairs
         domains=None,  # turns on ENM
         positions=None,  # needed for ENM
+        restart=None,
         enmforce=500.0,  # 1/nm**2
         enmcutoff=0.9,  # nm
         interactions=None,  # list of interactions
@@ -251,6 +258,11 @@ class COCOMO:
     ):
 
         self.simulation = None
+        self.topology = None
+        self.positions = None
+        self.velocities = None
+        self.box = None
+        self.box_vectors = None
 
         self.params = params
         self.eps = eps
@@ -288,12 +300,27 @@ class COCOMO:
 
         if xml is not None:
             self.read_system(xml)
+            self.read_restart(restart)
             return
 
         self.system = System()
         self.setup_particles()
-        self.setup_box(box)
+
+        if box:
+            self.set_box(box * nanometer)
+
         self.setup_forces()
+        self.read_restart(restart)
+
+    def set_dummy_topology(self):
+        if not self.topology and self.system:
+            n_atoms = self.system.getNumParticles()
+            top = Topology()
+            chain = top.addChain()
+            res = top.addResidue("DUM", chain)
+            for i in range(n_atoms):
+                top.addAtom("C", element.carbon, res)
+            self.topology = top
 
     def describe(self) -> str:
         return f"This is COCOMO CG model simulator version {__version__}"
@@ -314,6 +341,14 @@ class COCOMO:
         if self.simulation is not None:
             self.simulation.loadState(fname)
 
+    def read_restart(self, fname):
+        if _is_readable_file(fname):
+            with open(fname) as f:
+                state = XmlSerializer.deserialize(f.read())
+            self.positions = state.getPositions()
+            self.velocities = state.getVelocities()
+            self.box_vectors = state.getPeriodicBoxVectors()
+
     def write_pdb(self, fname="state.pdb"):
         positions = self.simulation.context.getState(getPositions=True).getPositions()
         with open(fname, "w") as f:
@@ -326,14 +361,33 @@ class COCOMO:
             return 0.0
 
     def get_energies(self):
+        # Desired order by class name
+        priority = {
+            "HarmonicBondForce": 0,
+            "HarmonicAngleForce": 1,
+            "CustomNonbondedForce": 2,
+            "CustomBondForce": 3,
+            "CustomCentroidForce": 4,
+        }
+
+        forces = list(self.system.getForces())
+
+        indexed_forces = []
+        for idx, frc in enumerate(forces):
+            cls_name = frc.__class__.__name__
+            order = priority.get(cls_name, 100)
+            indexed_forces.append((order, idx, frc))
+
+        indexed_forces.sort(key=lambda x: (x[0], x[1]))
+
         energies = {}
-        for i, frc in enumerate(self.system.getForces()):
+        for _, _, frc in indexed_forces:
             g = frc.getForceGroup()
             e = self._group_energy(self.simulation.context, g)
-            name = frc.getName()
-            if not name:
-                name = frc.__class__.__name__
-            energies[f"{name}"] = e
+            name = frc.getName() or frc.__class__.__name__
+            key = f"{name}({g})"
+            energies[key] = e
+
         return energies
 
     def set_velocities(self, *, seed=None, newtemp=None):
@@ -352,27 +406,66 @@ class COCOMO:
             tolerance = tol * kilojoule / (nanometer * mole)
             self.simulation.minimizeEnergy(tolerance=tolerance, maxIterations=nstep)
 
-    def simulate(self, *, nstep=1000, nout=100, logfile="energy.log", dcdfile="traj.dcd"):
-        if self.simulation is not None:
-            dcd = DCDReporter(dcdfile, nout)
-            self.simulation.reporters.append(dcd)
-            log = StateDataReporter(
-                logfile,
-                nout,
-                step=True,
-                time=True,
-                potentialEnergy=True,
-                kineticEnergy=True,
-                totalEnergy=True,
-                temperature=True,
-                volume=True,
-                progress=True,
-                remainingTime=True,
-                speed=True,
-                totalSteps=nstep,
-                separator=" ",
+    class EnergyReporter:
+        def __init__(self, file, reportInterval, bias_force_names_to_groups):
+            """
+            file: output filename
+            reportInterval: reporting interval in steps
+            bias_force_names_to_groups: dict like {"angle": 1, "torsion": 2}
+            """
+            self.file = open(file, "w")
+            self.interval = reportInterval
+            self.bias_force_names_to_groups = bias_force_names_to_groups
+            header = f"{'Step':<20s}" + "".join(
+                f"{name:<20s}" for name in bias_force_names_to_groups
             )
-            self.simulation.reporters.append(log)
+            self.file.write(header + "\n")
+
+        def describeNextReport(self, simulation):
+            return (self.interval, False, False, False, False)
+
+        def report(self, simulation, state):
+            # First column: step, left-aligned in width 20
+            line = f"{simulation.currentStep:<20d}"
+            for name, group in self.bias_force_names_to_groups.items():
+                bias_state = simulation.context.getState(getEnergy=True, groups={group})
+                energy = bias_state.getPotentialEnergy().value_in_unit(kilojoule / mole)
+                line += f"{energy:<20.8f}"
+
+            self.file.write(line + "\n")
+            self.file.flush()
+
+        def __del__(self):
+            self.file.close()
+
+    def simulate(
+        self, *, nstep=1000, nout=1000, logfile=None, dcdfile=None, elogfile=None, forcelist=None
+    ):
+        if self.simulation is not None:
+            if dcdfile:
+                dcd = DCDReporter(dcdfile, nout)
+                self.simulation.reporters.append(dcd)
+            if logfile:
+                log = StateDataReporter(
+                    logfile,
+                    nout,
+                    step=True,
+                    time=True,
+                    potentialEnergy=True,
+                    kineticEnergy=True,
+                    totalEnergy=True,
+                    temperature=True,
+                    volume=True,
+                    progress=True,
+                    remainingTime=True,
+                    speed=True,
+                    totalSteps=nstep,
+                    separator=" ",
+                )
+                self.simulation.reporters.append(log)
+            if elogfile and forcelist:
+                log = self.EnergyReporter(elogfile, nout, self.get_force_groups(forcelist))
+                self.simulation.reporters.append(log)
             self.simulation.step(nstep)
 
     def set_sasa(self, sasa=None):
@@ -401,21 +494,39 @@ class COCOMO:
         tstep=0.01,
         resources="CPU",
         device=0,
-        positions=None,
         restart=None,
+        positions=None,
+        velocities=None,
+        resetvelocities=False,
+        box=None,
     ) -> None:
         # temperature: in K
         # tstep: in ps
         # gamma: in 1/ps
         # resources: 'CPU' or 'CUDA'
 
-        assert self.topology is not None, "need topology to be defined"
         assert self.system is not None, "need openMM system object to be defined"
 
-        self.temperature = temperature * kelvin
-        self.tstep = tstep * picoseconds
-        self.gamma = gamma / picoseconds
         self.resources = resources
+
+        if restart is not None:
+            self.read_restart(restart)
+        if positions:
+            self.positions = positions
+        if velocities:
+            self.velocities = velocities
+        if box:
+            self.set_box(box * nanometer)
+
+        if temperature:
+            self.temperature = temperature * kelvin
+        if tstep:
+            self.tstep = tstep * picoseconds
+        if gamma:
+            self.gamma = gamma / picoseconds
+
+        if not self.topology:
+            self.set_dummy_topology()
 
         self.integrator = LangevinIntegrator(self.temperature, self.gamma, self.tstep)
         self.platform = Platform.getPlatformByName(self.resources)
@@ -427,18 +538,45 @@ class COCOMO:
             )
         if self.resources == "CPU":
             self.simulation = Simulation(self.topology, self.system, self.integrator, self.platform)
-        if restart is not None:
-            self.read_state(restart)
+
+        if self.positions:
+            self.simulation.context.setPositions(self.positions)
+
+        if resetvelocities:
+            self.set_velocities()
         else:
-            if positions is not None:
-                self.set_positions(positions)
-            if self.positions is not None:
-                self.simulation.context.setPositions(self.positions)
+            if self.velocities:
+                self.simulation.context.setVelocities(self.velocities)
+            else:
+                self.set_velocities()
+
+        if self.box_vectors:
+            a, b, c = self.box_vectors
+            self.simulation.context.setPeriodicBoxVectors(a, b, c)
 
     def set_positions(self, positions) -> None:
         self.positions = positions
         if self.simulation is not None:
             self.simulation.context.setPositions(positions)
+
+    def get_positions(self):
+        if self.simulation:
+            return self.simulation.context.getState(getPositions=True).getPositions()
+        else:
+            return None
+
+    def get_velocities(self):
+        if self.simulation:
+            return self.simulation.context.getState(getVelocities=True).getVelocities()
+        else:
+            return None
+
+    def get_masses(self):
+        if self.system:
+            nparticles = self.system.getNumParticles()
+            return [self.system.getParticleMass(i) for i in range(nparticles)]
+        else:
+            return None
 
     def setup_particles(self) -> None:
         if self.topology is None:
@@ -448,25 +586,81 @@ class COCOMO:
         for atm in self.topology.atoms():
             self.system.addParticle(self.params[atm.residue.name].mass * amu)
 
-    def setup_box(self, box) -> None:
-        ax_nm, by_nm, cz_nm = self._normalize_box_nm(box)
+    def set_box(self, box) -> None:
+        ax_nm, by_nm, cz_nm = self._normalize_box(box)
 
         a_sys = Vec3(ax_nm, 0.0, 0.0) * nanometer
         b_sys = Vec3(0.0, by_nm, 0.0) * nanometer
         c_sys = Vec3(0.0, 0.0, cz_nm) * nanometer
 
+        # record on the class
+        self.box: tuple[float, float, float] = (ax_nm, by_nm, cz_nm)
+        self.box_vectors = (a_sys, b_sys, c_sys)
+
+        # set on topology and system
         a_top = Vec3(ax_nm, 0.0, 0.0)
         b_top = Vec3(0.0, by_nm, 0.0)
         c_top = Vec3(0.0, 0.0, cz_nm)
 
-        # record on the class
-        self.box_nm: tuple[float, float, float] = (ax_nm, by_nm, cz_nm)
-        self.box_vectors = (a_sys, b_sys, c_sys)
-
-        # set on topology and system
         if self.topology is not None:
             self.topology.setPeriodicBoxVectors((a_top, b_top, c_top))
         self.system.setDefaultPeriodicBoxVectors(a_sys, b_sys, c_sys)
+
+    def set_force_groups(self):
+        if self.system:
+            for i, force in enumerate(self.system.getForces()):
+                force.setForceGroup(i)
+
+    def get_force_groups(self, names: Sequence[str]) -> dict[str, int]:
+        """
+        Return a mapping {force_key: force_group} for forces whose names
+        match any of the provided strings.
+
+        If a force name appears multiple times, additional entries are created
+        with keys 'name', 'name_2', 'name_3', ...
+
+        Parameters
+        ----------
+        names : sequence of str
+            Name fragments to match against Force.getName() (or class name).
+
+        Returns
+        -------
+        dict[str, int]
+            Keys are disambiguated force labels, values are their force group indices.
+        """
+        if self.system is None:
+            raise RuntimeError("System has not been created yet.")
+
+        # Normalize input
+        if isinstance(names, str):
+            patterns = [names]
+        else:
+            patterns = list(names)
+
+        patterns = [p for p in patterns if p]
+        if not patterns:
+            return {}
+
+        forcelist: dict[str, int] = {}
+
+        for force in self.system.getForces():
+            fname = force.getName() or force.__class__.__name__
+            # check if any pattern matches this force name
+            if not any(pat in fname for pat in patterns):
+                continue
+
+            # determine dict key, handling duplicates: name, name_2, name_3, ...
+            key = fname
+            if key in forcelist:
+                i = 2
+                while f"{fname}_{i}" in forcelist:
+                    i += 1
+                key = f"{fname}_{i}"
+
+            forcelist[key] = force.getForceGroup()
+
+        return forcelist
 
     def setup_forces(self) -> None:
         self.forces = {}
@@ -479,7 +673,7 @@ class COCOMO:
             self.setupInteractionForce()
             if self.removecmmotion:
                 self.setupCMMotionRemover()
-            self.forcemapping = self.assign_force_groups()
+            self.set_force_groups()
 
     def setupBondForce(
         self, *, l0protein=bond_l0_protein, l0na=bond_l0_na, kprotein=bond_k_protein, kna=bond_k_na
@@ -716,9 +910,9 @@ class COCOMO:
                 self.enmpairs = self._findENMPairs()
 
             if self.enmpairs is not None and len(self.enmpairs) > 0:
-                equation = "0.5*k*(r-r0)^2"
+                equation = "0.5*kenm*(r-r0)^2"
                 force = CustomBondForce(equation)
-                force.addGlobalParameter("k", self.enmforce)
+                force.addGlobalParameter("kenm", self.enmforce)
                 force.addPerBondParameter("r0")
 
                 for enm in self.enmpairs:
@@ -877,22 +1071,611 @@ class COCOMO:
             self.system.addForce(harmonic_force)
             self.forces["interaction_harmonic"] = harmonic_force
 
+    def set_position_restraint(
+        self, *, selection="name CA", atomlist=None, k=100.0, positions=None
+    ):
+        """
+        Apply PBC-aware positional restraints to a set of atoms.
+
+        Parameters
+        ----------
+        selection : str
+            MDTraj selection string (ignored if `atomlist` is provided).
+        atomlist : sequence of int or openmm.app.Atom
+            Atoms to restrain, given as indices or Atom objects.
+        k : float
+            Force constant in kJ/mol/nm^2.
+        positions : reference positions
+        """
+        if self.system is None:
+            raise RuntimeError("System has not been created yet.")
+
+        # Determine atom indices
+        if atomlist is not None:
+            # Accept list of ints or list of Atom objects
+            if len(atomlist) == 0:
+                return
+            first = atomlist[0]
+            if isinstance(first, int):
+                indices = list(atomlist)
+            else:
+                # assume OpenMM Atom objects
+                indices = [a.index for a in atomlist]
+        else:
+            if self.topology is None:
+                raise RuntimeError("Topology is required for selection-based restraints.")
+            md_top = md.Topology.from_openmm(self.topology)
+            indices = md_top.select(selection).tolist()
+
+        if not indices:
+            return  # nothing to restrain
+
+        # Get reference positions (in nm)
+        if positions is not None:
+            pos = positions
+        elif self.positions is not None:
+            pos = self.positions
+        elif self.simulation is not None:
+            pos = self.simulation.context.getState(getPositions=True).getPositions()
+        else:
+            raise RuntimeError("No positions available to define restraint reference points.")
+
+        force = CustomExternalForce("0.5 * posk * periodicdistance(x, y, z, x0, y0, z0)^2")
+        force.addGlobalParameter("posk", k * kilojoule / (nanometer**2 * mole))
+        force.addPerParticleParameter("x0")
+        force.addPerParticleParameter("y0")
+        force.addPerParticleParameter("z0")
+
+        # Convert positions to nm if they are a Quantity
+        if hasattr(pos, "value_in_unit"):
+            # pos is a Quantity (e.g. from State.getPositions())
+            pos_nm = pos.value_in_unit(nanometer)
+        else:
+            # pos is already a list/array of Vec3 or xyz triples in nm
+            pos_nm = pos
+
+        for idx in indices:
+            p = pos_nm[idx]
+            # p can be a Vec3 or a length-3 iterable of floats
+            if hasattr(p, "x"):
+                x0, y0, z0 = p.x, p.y, p.z
+            else:
+                x0, y0, z0 = p[0], p[1], p[2]
+            force.addParticle(idx, [x0, y0, z0])
+
+        force.setName("PositionalRestraints")
+        self.system.addForce(force)
+
+    def set_umbrella_xyz_distance(
+        self, groupa, groupb, *, direction="x", target=0.0, k=10.0, center="cog"
+    ):
+        if self.system:
+            bias = f"0.5 * uk_{direction} * ((abs({direction}2 - {direction}1) - target)^2)"
+            force = CustomCentroidBondForce(2, bias)
+            force.addPerBondParameter("target")  # target distance (nm)
+            force.addGlobalParameter(f"uk_{direction}", k * kilojoule / mole / nanometer**2)
+            if center.lower() == "cog":
+                force.addGroup(groupa, [1.0] * len(groupa))
+                force.addGroup(groupb, [1.0] * len(groupb))
+            elif center.lower() == "com":
+                force.addGroup(groupa)
+                force.addGroup(groupb)
+            else:
+                raise ValueError(f"Center option {center} is not valid.")
+
+            force.addBond([0, 1], [target * nanometer])
+            force.setName(f"Umbrella_{direction}")
+            self.system.addForce(force)
+
+    def update_umbrella_xyz_distance(self, direction="x", k=10.0):
+        if self.system and self.simulation:
+            self.simulation.context.setParameter(
+                f"uk_{direction}", k * kilojoule / mole / nanometer**2
+            )
+
+    def set_umbrella_distance(
+        self, groupa, groupb, *, target=0.0, k=10.0, periodic=False, center="cog"
+    ):
+        if self.system:
+            bias = "0.5 * uk_dist * ((distance(g1,g2) - target)^2)"
+            force = CustomCentroidBondForce(2, bias)
+            force.addPerBondParameter("target")  # target distance (nm)
+            force.addGlobalParameter("uk_dist", k * kilojoule / mole / nanometer**2)
+            if center.lower() == "cog":
+                force.addGroup(groupa, [1.0] * len(groupa))
+                force.addGroup(groupb, [1.0] * len(groupb))
+            elif center.lower() == "com":
+                force.addGroup(groupa)
+                force.addGroup(groupb)
+            else:
+                raise ValueError(f"Center option {center} is not valid.")
+
+            force.addBond([0, 1], [target * nanometer])
+            if self.box_vectors and periodic:
+                force.setUsesPeriodicBoundaryConditions(True)
+            force.setName("Umbrella_distance")
+            self.system.addForce(force)
+
+    def update_umbrella_distance(self, k=10.0):
+        if self.system and self.simulation:
+            self.simulation.context.setParameter("uk_dist", k * kilojoule / mole / nanometer**2)
+
+    def _compute_center(self, group, positions_nm, *, center="cog"):
+        """Compute the center (COG or COM) of `group` using positions in nm.
+
+        Parameters
+        ----------
+        group : sequence[int]
+            Atom indices.
+        positions_nm : sequence
+            Positions in nm, either a list of Vec3 or an (N,3)-like array.
+        center : {"cog", "com"}
+            - "cog": center of geometry (equal weights)
+            - "com": center of mass (particle masses from `self.system`)
+
+        Returns
+        -------
+        np.ndarray
+            Shape (3,) array (x,y,z) in nm.
+        """
+        if group is None or len(group) == 0:
+            raise ValueError("group must contain at least one atom index")
+
+        mode = (center or "cog").lower()
+        if mode not in {"cog", "com"}:
+            raise ValueError(f"Center option {center} is not valid. Use 'cog' or 'com'.")
+
+        # Coordinates
+        coords = np.empty((len(group), 3), dtype=float)
+        for i, idx in enumerate(group):
+            p = positions_nm[int(idx)]
+            if hasattr(p, "x"):
+                coords[i, 0] = float(p.x)
+                coords[i, 1] = float(p.y)
+                coords[i, 2] = float(p.z)
+            else:
+                coords[i, 0] = float(p[0])
+                coords[i, 1] = float(p[1])
+                coords[i, 2] = float(p[2])
+
+        if mode == "cog":
+            return coords.mean(axis=0)
+
+        # COM
+        if self.system is None:
+            raise RuntimeError("System has not been created yet; cannot compute COM.")
+
+        masses = np.empty((len(group),), dtype=float)
+        for i, idx in enumerate(group):
+            m = self.system.getParticleMass(int(idx))
+            # Quantity-like in dalton; we only need a unitless weight.
+            if hasattr(m, "value_in_unit") and hasattr(m, "unit"):
+                masses[i] = float(m.value_in_unit(m.unit))
+            else:
+                masses[i] = float(getattr(m, "_value", m))
+
+        m_tot = float(masses.sum())
+        if m_tot == 0.0:
+            raise ValueError("Total mass of group is zero; cannot compute COM.")
+        return (masses[:, None] * coords).sum(axis=0) / m_tot
+
+    def set_umbrella_center(
+        self,
+        group,
+        *,
+        k=10.0,
+        target=None,  # single or per-group; see docstring
+        periodic=False,
+        center="cog",
+    ):
+        """
+        Restrain the center (COM or COG) of one or more groups to fixed points.
+
+        Parameters
+        ----------
+        group
+            Either:
+              - sequence[int]: one group of atom indices, or
+              - sequence[sequence[int]]: multiple groups, each a sequence of atom indices.
+        k
+            Force constant in kJ/mol/nm^2 (shared for all groups).
+        target
+            - None:
+                For each group, target is taken as its current center.
+            - Single (x,y,z) in nm (tuple/list) or 3-element Quantity:
+                Same target used for all groups.
+            - Sequence of length 1 or n_groups:
+                Per-group targets; each element may be:
+                  * None  -> use current center of that group
+                  * (x,y,z) in nm (tuple/list)
+                  * 3-element Quantity with length units
+        periodic
+            If True and a periodic box is defined, enable PBC on the bias.
+        center
+            - cog:
+                Center of geometry (default)
+            - com
+                Center of mass
+        """
+        from collections.abc import Sequence
+
+        if self.system is None:
+            raise RuntimeError("System has not been created yet.")
+
+        # --- normalize groups to a list of lists of ints --------------------
+        def _is_int_like(x):
+            return isinstance(x, int)
+
+        if not isinstance(group, Sequence) or len(group) == 0:
+            return
+
+        if _is_int_like(group[0]):
+            # single group: [i,j,k,...]
+            groups = [list(group)]
+        else:
+            # multiple groups: [[...], [...], ...]
+            groups = [list(g) for g in group]
+
+        if not groups:
+            return
+
+        n_groups = len(groups)
+
+        # --- positions in nm (computed lazily, only if needed) -------------
+        pos_nm = None
+
+        def _get_pos_nm():
+            nonlocal pos_nm
+            if pos_nm is not None:
+                return pos_nm
+
+            if self.positions is not None:
+                pos = self.positions
+            elif self.simulation is not None:
+                pos = self.simulation.context.getState(getPositions=True).getPositions()
+            else:
+                raise RuntimeError("No positions available to define center restraint reference.")
+
+            if hasattr(pos, "value_in_unit"):
+                pos_nm_local = pos.value_in_unit(nanometer)
+            else:
+                pos_nm_local = pos  # assume already in nm
+
+            pos_nm = pos_nm_local
+            return pos_nm
+
+        # --- helpers --------------------------------------------------------
+        def _norm_xyz(t):
+            """Return (x,y,z) in nm as floats from Quantity or 3-sequence."""
+            if hasattr(t, "value_in_unit"):
+                arr = t.value_in_unit(nanometer)
+                return float(arr[0]), float(arr[1]), float(arr[2])
+            # assume 3-sequence of numbers
+            return float(t[0]), float(t[1]), float(t[2])
+
+        def _is_scalar_xyz(seq):
+            """Heuristic: 3 non-sequence elements -> treat as single xyz."""
+            if not isinstance(seq, Sequence):
+                return False
+            if len(seq) != 3:
+                return False
+            for v in seq:
+                if isinstance(v, Sequence) and not hasattr(v, "value_in_unit"):
+                    return False
+            return True
+
+        # --- build per-group reference coordinates --------------------------
+        xyz_list = []
+
+        if target is None:
+            # All targets from current centers
+            pos_nm = _get_pos_nm()
+            for g in groups:
+                xyz_list.append(self._compute_center(g, pos_nm, center=center))
+        else:
+            # target provided; could be:
+            # - Quantity -> same for all groups
+            # - (x,y,z) -> same for all groups
+            # - sequence of per-group entries
+            if hasattr(target, "value_in_unit") or _is_scalar_xyz(target):
+                base = _norm_xyz(target)
+                xyz_list = [base for _ in range(n_groups)]
+            else:
+                # Treat as per-group target list
+                if not isinstance(target, Sequence):
+                    raise TypeError(
+                        "target must be None, a single (x,y,z)/Quantity, "
+                        "or a sequence of per-group targets."
+                    )
+
+                # allow broadcasting: length 1 -> repeat for all groups
+                if len(target) == 1 and n_groups > 1:
+                    per_group = list(target) * n_groups
+                else:
+                    if len(target) != n_groups:
+                        raise ValueError(
+                            "Per-group target sequence length must be 1 or match "
+                            "the number of groups."
+                        )
+                    per_group = list(target)
+
+                for g, t in zip(groups, per_group):
+                    if t is None:
+                        pos_nm = _get_pos_nm()
+                        xyz_list.append(self._compute_center(g, pos_nm, center=center))
+                    else:
+                        xyz_list.append(_norm_xyz(t))
+
+        # --- define the CustomCentroidBondForce -----------------------------
+        bias = "0.5 * uk_center * ((x1 - x0)^2 + (y1 - y0)^2 + (z1 - z0)^2)"
+        force = CustomCentroidBondForce(1, bias)
+        force.addGlobalParameter("uk_center", k * kilojoule / (mole * nanometer**2))
+        force.addPerBondParameter("x0")
+        force.addPerBondParameter("y0")
+        force.addPerBondParameter("z0")
+
+        # add groups
+        group_ids = []
+        if center.lower() == "cog":
+            for g in groups:
+                gid = force.addGroup(g, [1.0] * len(g))
+                group_ids.append(gid)
+        elif center.lower() == "com":
+            for g in groups:
+                gid = force.addGroup(g)
+                group_ids.append(gid)
+        else:
+            raise ValueError(f"Center option {center} is not valid.")
+
+        # add one bond per group
+        for gid, (x0, y0, z0) in zip(group_ids, xyz_list):
+            force.addBond([gid], [x0, y0, z0])
+
+        if self.box_vectors and periodic:
+            force.setUsesPeriodicBoundaryConditions(True)
+
+        force.setName("Umbrella_center")
+        self.system.addForce(force)
+
+    def update_umbrella_center(self, k=10.0):
+        if self.system and self.simulation:
+            self.simulation.context.setParameter("uk_center", k * kilojoule / (mole * nanometer**2))
+
+    def set_umbrella_angle_norm(
+        self,
+        groupa,
+        groupa1,
+        groupa2,
+        groupb,
+        groupb1,
+        groupb2,
+        *,
+        target=np.radians(0),
+        k=10.0,
+        center="cog",
+    ):
+        """
+        Harmonic umbrella on the angle between two plane normals (groups A and B).
+
+        Angle is in radians; target is in radians; k is in kJ/mol/rad^2.
+        """
+        if not self.system:
+            return
+
+        bias = (
+            # Harmonic in the angle between plane normals
+            "0.5 * uk_angle_norm * (theta - target)^2;"
+            # angle in [0, pi]: y >= 0 ensures atan2 ∈ [0, pi]
+            "theta = atan2(sinang, cosang);"
+            "sinang = magCross / denom;"
+            "cosang = dotAB / denom;"
+            # denom ~ |nA||nB| via dot/cross identity, with small epsilon to avoid 0
+            "denom = sqrt(dotAB*dotAB + magCross*magCross) + 1e-8;"
+            "magCross = sqrt(cx*cx + cy*cy + cz*cz);"
+            # nA × nB
+            "cx = nyA_tmp*nzB_tmp - nzA_tmp*nyB_tmp;"
+            "cy = nzA_tmp*nxB_tmp - nxA_tmp*nzB_tmp;"
+            "cz = nxA_tmp*nyB_tmp - nyA_tmp*nxB_tmp;"
+            # nA · nB
+            "dotAB = nxA_tmp*nxB_tmp + nyA_tmp*nyB_tmp + nzA_tmp*nzB_tmp;"
+            # plane A normal nA = vA1 × vA2
+            "nxA_tmp = vA1y*vA2z - vA1z*vA2y;"
+            "nyA_tmp = vA1z*vA2x - vA1x*vA2z;"
+            "nzA_tmp = vA1x*vA2y - vA1y*vA2x;"
+            # plane B normal nB = vB1 × vB2
+            "nxB_tmp = vB1y*vB2z - vB1z*vB2y;"
+            "nyB_tmp = vB1z*vB2x - vB1x*vB2z;"
+            "nzB_tmp = vB1x*vB2y - vB1y*vB2x;"
+            # in-plane vectors for plane A: (A1-A0) and (A2-A0)
+            "vA1x = x2 - x1;"
+            "vA1y = y2 - y1;"
+            "vA1z = z2 - z1;"
+            "vA2x = x3 - x1;"
+            "vA2y = y3 - y1;"
+            "vA2z = z3 - z1;"
+            # in-plane vectors for plane B: (B1-B0) and (B2-B0)
+            "vB1x = x5 - x4;"
+            "vB1y = y5 - y4;"
+            "vB1z = z5 - z4;"
+            "vB2x = x6 - x4;"
+            "vB2y = y6 - y4;"
+            "vB2z = z6 - z4;"
+        )
+
+        force = CustomCentroidBondForce(6, bias)
+        force.addPerBondParameter("target")  # radians
+        force.addGlobalParameter("uk_angle_norm", k * kilojoule / (mole * radian**2))
+
+        # group order: (A0, A1, A2, B0, B1, B2)
+        if center.lower() == "cog":
+            force.addGroup(groupa, [1.0] * len(groupa))
+            force.addGroup(groupa1, [1.0] * len(groupa1))
+            force.addGroup(groupa2, [1.0] * len(groupa2))
+            force.addGroup(groupb, [1.0] * len(groupb))
+            force.addGroup(groupb1, [1.0] * len(groupb1))
+            force.addGroup(groupb2, [1.0] * len(groupb2))
+        elif center.lower() == "com":
+            force.addGroup(groupa)
+            force.addGroup(groupa1)
+            force.addGroup(groupa2)
+            force.addGroup(groupb)
+            force.addGroup(groupb1)
+            force.addGroup(groupb2)
+        else:
+            raise ValueError(f"Center option {center} is not valid.")
+
+        force.addBond([0, 1, 2, 3, 4, 5], [target * radian])
+
+        force.setName("Umbrella_angle_norm")
+        self.system.addForce(force)
+
+    def update_umbrella_angle_norm(self, k=10.0):
+        if self.system and self.simulation:
+            self.simulation.context.setParameter(
+                "uk_angle_norm", k * kilojoule / (mole * radian**2)
+            )
+
+    def set_umbrella_dihedral(
+        self,
+        groupa,
+        groupb,
+        groupc,
+        groupd,
+        *,
+        target=0.0,
+        k=10.0,
+        center="cog",
+    ):
+        """
+        Harmonic umbrella on the dihedral angle between four centroids.
+
+        The minimum is at the dihedral = target (in radians), using a 2π-periodic
+        quadratic distance: we choose the smallest of (Δ, Δ+2π, Δ-2π).
+
+        Parameters
+        ----------
+        groupa, groupb, groupc, groupd : sequence[int]
+            Atom indices for the four centroid groups.
+        target : float
+            Target dihedral angle in radians.
+        k : float
+            Force constant in kJ/mol/rad^2. Only used on first creation;
+            later calls just add more bonds. Adjust at runtime with
+            `update_umbrella_dihedral`.
+        """
+        if not self.system:
+            return
+
+        # Try to find an existing Umbrella_dihedral force
+        force = None
+        for f in self.system.getForces():
+            if isinstance(f, CustomCentroidBondForce) and f.getName() == "Umbrella_dihedral":
+                force = f
+                break
+
+        if force is None:
+            # Create the force the first time
+            bias = (
+                "0.5 * uk_dihedral * delta^2; "
+                "delta = delta - 2*pi*floor((delta + pi)/(2*pi));"
+                "pi = acos(-1);"
+                "delta = d - target;"
+                "d = dihedral(g1, g2, g3, g4);"
+            )
+
+            force = CustomCentroidBondForce(4, bias)
+            force.addPerBondParameter("target")  # radians
+            force.addGlobalParameter(
+                "uk_dihedral",
+                k * kilojoule / (mole * radian**2),
+            )
+            force.setName("Umbrella_dihedral")
+            self.system.addForce(force)
+
+        # For each call, add new centroid groups + a new bond
+        if center.lower() == "cog":
+            idx_a = force.addGroup(groupa, [1.0] * len(groupa))
+            idx_b = force.addGroup(groupb, [1.0] * len(groupb))
+            idx_c = force.addGroup(groupc, [1.0] * len(groupc))
+            idx_d = force.addGroup(groupd, [1.0] * len(groupd))
+        elif center.lower() == "com":
+            idx_a = force.addGroup(groupa)
+            idx_b = force.addGroup(groupb)
+            idx_c = force.addGroup(groupc)
+            idx_d = force.addGroup(groupd)
+        else:
+            raise ValueError(f"Center option {center} is not valid.")
+
+        force.addBond([idx_a, idx_b, idx_c, idx_d], [target * radian])
+
+    def update_umbrella_dihedral(self, k=10.0):
+        if self.system and self.simulation:
+            self.simulation.context.setParameter("uk_dihedral", k * kilojoule / mole / radian**2)
+
+    def set_umbrella_angle(
+        self,
+        groupa,
+        groupb,
+        groupc,
+        *,
+        target=np.pi / 2.0,
+        k=10.0,
+        center="cog",
+    ):
+        """
+        Harmonic umbrellas on an angle defined by centroid triplets.
+
+        Angle is in radians; restrained to `target`.
+
+        The angle is:
+          - angle(groupa, groupb, groupc)
+
+        All angle restraints share the same global force constant `uk_angle`.
+        """
+        if not self.system:
+            return
+
+        # Try to find an existing Umbrella_angle force
+        force = None
+        for f in self.system.getForces():
+            if isinstance(f, CustomCentroidBondForce) and f.getName() == "Umbrella_angle":
+                force = f
+                break
+
+        if force is None:
+            # Create the force the first time
+            bias = "0.5 * uk_angle * (angle(g1, g2, g3) - target)^2"
+            force = CustomCentroidBondForce(3, bias)
+            force.addPerBondParameter("target")  # radians
+            force.addGlobalParameter("uk_angle", k * kilojoule / (mole * radian**2))
+            force.setName("Umbrella_angle")
+
+            self.system.addForce(force)
+
+        # For each call, add new centroid groups + a new bond
+        if center.lower() == "cog":
+            idx_a = force.addGroup(groupa, [1.0] * len(groupa))
+            idx_b = force.addGroup(groupb, [1.0] * len(groupb))
+            idx_c = force.addGroup(groupc, [1.0] * len(groupc))
+        elif center.lower() == "com":
+            idx_a = force.addGroup(groupa)
+            idx_b = force.addGroup(groupb)
+            idx_c = force.addGroup(groupc)
+        else:
+            raise ValueError(f"Center option {center} is not valid.")
+
+        force.addBond([idx_a, idx_b, idx_c], [target * radian])
+
+    def update_umbrella_angle(self, k=10.0):
+        if self.system and self.simulation:
+            self.simulation.context.setParameter("uk_angle", k * kilojoule / mole / radian**2)
+
     def setupCMMotionRemover(self) -> None:
         if self.topology is not None and self.removecmmotion:
             force = CMMotionRemover()
             force.setName("cmmotion")
             self.forces["cmmotion"] = force
             self.system.addForce(force)
-
-    def assign_force_groups(self):
-        mapping = {}
-        for i, frc in enumerate(self.system.getForces()):
-            frc.setForceGroup(i % 32)
-            name = frc.getName()
-            if not name:
-                name = frc.__class__.__name__
-            mapping[frc.getForceGroup()] = (i, name)
-        return mapping
 
     @staticmethod
     def _group_energy(context, group: int):
@@ -928,7 +1711,7 @@ class COCOMO:
                     self.topology.addBond(atm[i], atm[i + 1])
 
     @staticmethod
-    def _normalize_box_nm(box) -> tuple[float, float, float]:
+    def _normalize_box(box) -> tuple[float, float, float]:
         """
         Normalize user input to a 3-tuple of floats in nanometers.
         Accepts:
@@ -949,16 +1732,186 @@ class COCOMO:
                 return (ax, by, cz)
             raise TypeError("Quantity box must be scalar or length-3.")
 
-        # Plain numeric
+        # Plain numeric assumed to be in angstroms
         if isinstance(box, (int, float)):
-            val = float(box)
+            val = float(box) / 10.0
             return (val, val, val)
 
-        # Plain sequence
+        # Plain sequence assumed to be in angstroms
         if isinstance(box, Sequence) and len(box) == 3:
             ax, by, cz = box
             if not all(isinstance(v, (int, float)) for v in (ax, by, cz)):
                 raise TypeError("Box tuple must contain numbers.")
-            return (float(ax), float(by), float(cz))
+            return (float(ax) / 10.0, float(by) / 10.0, float(cz) / 10.0)
 
         raise TypeError("box must be a number, a length-3 tuple, or a Quantity.")
+
+
+def _is_readable_file(path):
+    """Return True if `path` is a readable file; False for None or invalid types."""
+    if not isinstance(path, str):
+        return False
+    return os.path.isfile(path) and os.access(path, os.R_OK)
+
+
+def harmonic_energy_xyz(
+    distance_vectors,
+    k: Quantity,  # e.g. 500.0 * kilojoule/mole/nanometer**2
+    target: Quantity,  # e.g. 6.80 * nanometer
+    axis: str = "x",
+):
+    """
+    0.5 * k * (|X| - target)^2 for a chosen Cartesian component X = x, y, or z.
+
+    k must have units of energy/length^2 (e.g. kJ/mol/nm^2).
+    Returns energies with units of energy (e.g. kJ/mol).
+    """
+    axis = axis.lower()
+    axis_idx = {"x": 0, "y": 1, "z": 2}[axis]
+
+    # Normalize to list-of-Quantities for internal loop
+    if isinstance(distance_vectors, Quantity):
+        vec_list = [distance_vectors]
+        single = True
+    else:
+        vec_list = list(distance_vectors)
+        single = False
+
+    # Scalar target in nm (float)
+    target_nm = target.value_in_unit(nanometer)
+
+    out = []
+    for q in vec_list:
+        # Vec3 components in nm (plain floats)
+        v_nm = q.value_in_unit(nanometer)
+        comp = abs(v_nm[axis_idx])  # |X| in nm (float)
+
+        delta = comp - target_nm  # float in "nm"
+        # Reattach nm^2 so units: (energy/length^2) * length^2 -> energy
+        e = 0.5 * k * (delta**2) * nanometer**2
+        out.append(e)
+
+    return out[0] if single else out
+
+
+def harmonic_energy_distance(
+    distances,
+    k: Quantity,  # e.g. 500.0 * kilojoule/mole/nanometer**2
+    target: Quantity,  # e.g. 7.0 * nanometer
+):
+    """
+    0.5 * k * (d - target)^2 for scalar distances d.
+
+    k must have units of energy/length^2 (e.g. kJ/mol/nm^2).
+    Returns energies with units of energy (e.g. kJ/mol).
+    """
+    # Normalize to list for internal loop
+    if isinstance(distances, Quantity):
+        d_list = [distances]
+        single = True
+    else:
+        d_list = list(distances)
+        single = False
+
+    target_nm = target.value_in_unit(nanometer)
+
+    out = []
+    for d in d_list:
+        d_nm = d.value_in_unit(nanometer)  # float
+        delta = d_nm - target_nm
+        e = 0.5 * k * (delta**2) * nanometer**2
+        out.append(e)
+
+    return out[0] if single else out
+
+
+def harmonic_energy_angle(
+    angles,
+    k: Quantity,  # e.g. 500.0 * kilojoule/mole/radian**2
+    target,  # e.g. 0.0 * radian  OR float (radians)
+):
+    """
+    0.5 * k * (theta - target)^2 for scalar angles in radians.
+
+    k must have units of energy/rad^2 (e.g. kJ/mol/rad^2).
+    Returns energies with units of energy (e.g. kJ/mol).
+    """
+    # Normalize to list
+    if isinstance(angles, Quantity) or isinstance(angles, (float, int)):
+        a_list = [angles]
+        single = True
+    else:
+        a_list = list(angles)
+        single = False
+
+    # Target in radians as float
+    if isinstance(target, Quantity):
+        target_rad = target.value_in_unit(radian)
+    else:
+        target_rad = float(target)
+
+    out = []
+    for a in a_list:
+        if isinstance(a, Quantity):
+            theta = a.value_in_unit(radian)
+        else:
+            theta = float(a)
+
+        delta = theta - target_rad
+        # multiply by radian**2 so units: (energy/rad^2) * rad^2 -> energy
+        e = 0.5 * k * (delta**2) * radian**2
+        out.append(e)
+
+    return out[0] if single else out
+
+
+def harmonic_energy_dihedral(
+    dihedrals,
+    k: Quantity,  # e.g. 500.0 * kilojoule/mole/radian**2
+    target,  # target angle, Quantity[angle] or float (radians)
+):
+    """
+    Periodic harmonic dihedral energy:
+
+        bias = 0.5 * k * delta^2
+        delta = delta - 2*pi*floor((delta + pi)/(2*pi))
+        delta = d - target
+
+    with d and target in radians.
+
+    k must have units of energy/rad^2 (e.g. kJ/mol/rad^2).
+    Returns energies with units of energy (e.g. kJ/mol).
+    """
+    # Normalize to list
+    if isinstance(dihedrals, Quantity) or isinstance(dihedrals, (float, int)):
+        d_list = [dihedrals]
+        single = True
+    else:
+        d_list = list(dihedrals)
+        single = False
+
+    # Target in radians as float
+    if isinstance(target, Quantity):
+        target_rad = target.value_in_unit(radian)
+    else:
+        target_rad = float(target)
+
+    out = []
+    two_pi = 2.0 * pi
+
+    for d in d_list:
+        if isinstance(d, Quantity):
+            d_rad = d.value_in_unit(radian)
+        else:
+            d_rad = float(d)
+
+        # delta = d - target
+        delta = d_rad - target_rad
+        # delta = delta - 2*pi*floor((delta + pi)/(2*pi))
+        delta = delta - two_pi * floor((delta + pi) / two_pi)
+
+        # multiply by radian**2 to cancel 1/rad^2 in k
+        e = 0.5 * k * (delta**2) * radian**2
+        out.append(e)
+
+    return out[0] if single else out
