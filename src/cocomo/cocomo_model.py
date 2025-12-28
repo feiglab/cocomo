@@ -307,7 +307,7 @@ class COCOMO:
         self.setup_particles()
 
         if box:
-            self.set_box(box * nanometer)
+            self.set_box(box)
 
         self.setup_forces()
         self.read_restart(restart)
@@ -516,7 +516,7 @@ class COCOMO:
         if velocities:
             self.velocities = velocities
         if box:
-            self.set_box(box * nanometer)
+            self.set_box(box)
 
         if temperature:
             self.temperature = temperature * kelvin
@@ -604,7 +604,6 @@ class COCOMO:
 
         if self.topology is not None:
             self.topology.setPeriodicBoxVectors((a_top, b_top, c_top))
-        self.system.setDefaultPeriodicBoxVectors(a_sys, b_sys, c_sys)
 
     def set_force_groups(self):
         if self.system:
@@ -1713,36 +1712,42 @@ class COCOMO:
     @staticmethod
     def _normalize_box(box) -> tuple[float, float, float]:
         """
-        Normalize user input to a 3-tuple of floats in nanometers.
+        Normalize user input to a 3-tuple of floats in nm.
+
         Accepts:
-          - scalar number (int/float)
-          - 3-sequence of numbers
-          - openmm.unit.Quantity scalar/3-sequence with length units
+          - scalar number (int/float) interpreted as Angstrom -> nm
+          - 3-sequence of numbers interpreted as Angstrom -> nm
+          - openmm.unit.Quantity scalar or length-3 (any length units) -> nm
+          - 3-sequence where each element may be a number (Angstrom) or Quantity (length)
         """
-        # Quantity support (optional but handy)
+        # Quantity support: box itself is a Quantity (scalar or length-3)
         if isinstance(box, Quantity):
-            # convert to nm and pull magnitude
             box_in_nm = box.value_in_unit(nanometer)
             if isinstance(box_in_nm, (int, float)):
                 val = float(box_in_nm)
                 return (val, val, val)
-            # sequence quantity
             if isinstance(box_in_nm, Sequence) and len(box_in_nm) == 3:
                 ax, by, cz = map(float, box_in_nm)
                 return (ax, by, cz)
             raise TypeError("Quantity box must be scalar or length-3.")
 
-        # Plain numeric assumed to be in angstroms
+        # Plain numeric: assume Angstrom
         if isinstance(box, (int, float)):
             val = float(box) / 10.0
             return (val, val, val)
 
-        # Plain sequence assumed to be in angstroms
+        # Sequence length-3: allow numbers (Angstrom) and/or Quantity (length)
         if isinstance(box, Sequence) and len(box) == 3:
             ax, by, cz = box
-            if not all(isinstance(v, (int, float)) for v in (ax, by, cz)):
-                raise TypeError("Box tuple must contain numbers.")
-            return (float(ax) / 10.0, float(by) / 10.0, float(cz) / 10.0)
+
+            def _to_nm(v) -> float:
+                if isinstance(v, Quantity):
+                    return float(v.value_in_unit(nanometer))
+                if isinstance(v, (int, float)):
+                    return float(v) / 10.0  # Angstrom -> nm
+                raise TypeError("Box elements must be numbers or Quantity[length].")
+
+            return (_to_nm(ax), _to_nm(by), _to_nm(cz))
 
         raise TypeError("box must be a number, a length-3 tuple, or a Quantity.")
 
