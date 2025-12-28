@@ -594,7 +594,6 @@ class COCOMO:
 
     def set_box(self, box) -> None:
         ax_nm, by_nm, cz_nm = self._normalize_box(box)
-        print(ax_nm, by_nm, cz_nm)
 
         a_sys = Vec3(ax_nm, 0.0, 0.0) * nanometer
         b_sys = Vec3(0.0, by_nm, 0.0) * nanometer
