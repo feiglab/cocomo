@@ -19,6 +19,7 @@ from openmm import (
     HarmonicAngleForce,
     HarmonicBondForce,
     LangevinIntegrator,
+    OpenMMException,
     Platform,
     State,
     System,
@@ -529,8 +530,13 @@ class COCOMO:
             self.set_dummy_topology()
 
         self.integrator = LangevinIntegrator(self.temperature, self.gamma, self.tstep)
-        self.platform = Platform.getPlatformByName(self.resources)
         self.simulation = None
+        try:
+            self.platform = Platform.getPlatformByName(self.resources)
+        except OpenMMException:
+            self.platform = Platform.getPlatformByName("CPU")
+            self.resources = "CPU"
+
         if self.resources == "CUDA":
             prop = dict(CudaPrecision="mixed", CudaDeviceIndex=str(device))
             self.simulation = Simulation(
