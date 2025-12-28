@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import io
 import shlex
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
@@ -22,8 +21,8 @@ from openmm.unit import (
     norm,
 )
 
-FileLike = Union[str, Path, io.BytesIO, io.StringIO]
-
+FileLike = Union[str, Path]
+DirLike = Union[str, Path]
 
 # --- Data containers ---------------------------------------------------------
 
@@ -200,7 +199,7 @@ class ComponentType:
         return []
 
     def writeout(
-        self, tag: str = "none", path: Union[str | Path] = "data", *, dir: Union[str | Path] = "."
+        self, tag: str = "none", path: Union[str | Path] = "data", *, dir: DirLike = "."
     ) -> None:
         base = Path(dir)
         base.mkdir(parents=True, exist_ok=True)
@@ -261,9 +260,9 @@ class ComponentType:
 
     @staticmethod
     def read_list(
-        path: Union[FileLike | Path | str] = "component_types",
+        path: FileLike = "component_types",
         *,
-        dir: Union[str | Path] = ".",
+        dir: DirLike = ".",
     ) -> dict[str, ComponentType]:
         """
         Read component types from `path` (path or file-like) and return {key: ComponentType}.
@@ -271,18 +270,14 @@ class ComponentType:
         base = Path(dir)
         comps: dict[str, ComponentType] = {}
 
-        # open handle
-        need_close = False
-        if _is_fileobj(path):
-            fh = path  # already-open file-like
-        else:
-            p = Path(path)
-            if not p.is_file() and not p.is_absolute():
-                p = base / p
-            if not p.is_file():
-                raise FileNotFoundError(f"component types file not found: {p}")
-            fh = p.open()
-            need_close = True
+        p = Path(path)
+        if not p.is_file() and not p.is_absolute():
+            p = base / p
+        if not p.is_file():
+            raise FileNotFoundError(f"component types file not found: {p}")
+
+        list_dir = p.parent
+        fh = p.open()
 
         try:
             for ln, line in enumerate(fh, 1):
@@ -292,22 +287,20 @@ class ComponentType:
 
                 tokens = _parse_line(line)
 
-                name = "unknown"
-                if "tag" in tokens:
-                    name = tokens["tag"]
-                if "name" in tokens:
-                    name = tokens["name"]
+                name = tokens.get("name", tokens.get("tag", "unknown"))
 
                 pdb = None
                 if "pdb" in tokens:
-                    pdb = str(base / tokens["pdb"])
+                    pdb = _resolve_optional_file(tokens["pdb"], base=base, list_dir=list_dir)
 
                 getsasa = None
                 if "sasa" in tokens:
                     if tokens["sasa"] == "auto":
                         getsasa = "auto"
                     else:
-                        getsasa = str(base / tokens["sasa"])
+                        getsasa = _resolve_optional_file(
+                            tokens["sasa"], base=base, list_dir=list_dir
+                        )
 
                 domainsel = None
                 if "domains" in tokens:
@@ -315,14 +308,16 @@ class ComponentType:
 
                 getdomains = None
                 if "domainfile" in tokens:
-                    getdomains = str(base / tokens["domainfile"])
+                    getdomains = _resolve_optional_file(
+                        tokens["domainfile"], base=base, list_dir=list_dir
+                    )
 
                 getenm = None
                 if "enm" in tokens:
                     if tokens["enm"] == "auto":
                         getenm = "auto"
                     else:
-                        getenm = str(base / tokens["enm"])
+                        getenm = _resolve_optional_file(tokens["enm"], base=base, list_dir=list_dir)
 
                 enmcutoff = None
                 if "enmcutoff" in tokens:
@@ -340,8 +335,7 @@ class ComponentType:
 
                 comps[name] = ct
         finally:
-            if need_close:
-                fh.close()
+            fh.close()
 
         return comps
 
@@ -440,26 +434,20 @@ class InteractionSet:
         if self.ctypeA.model is None or self.ctypeB.model is None:
             raise ValueError("Both component types must have reference models to build pairs")
 
-        # open handle
-        need_close = False
-        if _is_fileobj(path):
-            fh = path  # type: ignore[assignment]
-        else:
-            p = Path(path)
+        p = Path(path)
 
-            # Search order required by user:
-            #  - absolute (handled in resolver)
-            #  - relative to CWD
-            #  - relative to dir= passed to read_list (base)
-            #  - relative to directory containing the interactions file
-            search_dirs = list(self._contact_search_dirs) if self._contact_search_dirs else []
-            if not search_dirs:
-                search_dirs = [Path.cwd()]
+        # Search order required by user:
+        #  - absolute (handled in resolver)
+        #  - relative to CWD
+        #  - relative to dir= passed to read_list (base)
+        #  - relative to directory containing the interactions file
+        search_dirs = list(self._contact_search_dirs) if self._contact_search_dirs else []
+        if not search_dirs:
+            search_dirs = [Path.cwd()]
 
-            resolved = _resolve_path_candidates(p, search_dirs)
-            _ensure_readable(resolved)
-            fh = resolved.open()  # type: ignore[assignment]
-            need_close = True
+        resolved = _resolve_path_candidates(p, search_dirs)
+        _ensure_readable(resolved)
+        fh = resolved.open()  # type: ignore[assignment]
 
         interactions: list[Interaction] = []
 
@@ -515,8 +503,7 @@ class InteractionSet:
                         )
                     )
         finally:
-            if need_close:
-                fh.close()
+            fh.close()
 
         return interactions
 
@@ -577,9 +564,9 @@ class InteractionSet:
     @staticmethod
     def read_list(
         ctypes: dict[str, ComponentType],
-        path: Union[FileLike | Path | str] = "interactions",
+        path: FileLike = "interactions",
         *,
-        dir: Union[str | Path] = ".",
+        dir: DirLike = ".",
     ) -> dict[str, InteractionSet]:
         """
         Read interaction sets from `path` (path or file-like) and return {key: InteractionSet}.
@@ -587,21 +574,13 @@ class InteractionSet:
         base = Path(dir)
         ints: dict[str, InteractionSet] = {}
 
-        # open handle
-        need_close = False
-        if _is_fileobj(path):
-            fh = path  # already-open file-like
-            interactions_file_dir = Path(dir)
-        else:
-            p = Path(path)
-
-            if not p.is_file() and not p.is_absolute():
-                p = base / p
-            if not p.is_file():
-                raise FileNotFoundError(f"interactions file not found: {p}")
-            fh = p.open()
-            need_close = True
-            interactions_file_dir = p.parent
+        p = Path(path)
+        if not p.is_file() and not p.is_absolute():
+            p = base / p
+        if not p.is_file():
+            raise FileNotFoundError(f"interactions file not found: {p}")
+        fh = p.open()
+        interactions_file_dir = p.parent
 
         try:
             for ln, line in enumerate(fh, 1):
@@ -643,8 +622,7 @@ class InteractionSet:
                 key = f"{tag1}.{tag2}"
                 ints[key] = intset
         finally:
-            if need_close:
-                fh.close()
+            fh.close()
 
         return ints
 
@@ -675,7 +653,7 @@ class Assembly:
         *,
         structure: Union[Structure, Model, FileLike, None] = None,
         interactions: Union[FileLike, None] = None,
-        dir: Union[str, Path] = ".",
+        dir: DirLike = ".",
     ) -> None:
         """
         If `components` and `types` are provided, load an Assembly from disk,
@@ -701,14 +679,11 @@ class Assembly:
             elif isinstance(structure, Model):
                 self.model = structure.select_CA()
             else:
-                if _is_fileobj(structure):
-                    self.model = PDBReader(structure).models[0].select_CA()
-                else:
-                    spath = Path(structure)
-                    if not spath.is_absolute():
-                        spath = Path(dir) / spath
-                    _ensure_readable(spath)
-                    self.model = PDBReader(spath).models[0].select_CA()
+                spath = Path(structure)
+                if not spath.is_absolute():
+                    spath = Path(dir) / spath
+                _ensure_readable(spath)
+                self.model = PDBReader(spath).models[0].select_CA()
 
         if components is not None and types is not None:
             self.read_components(components, types, dir=dir)
@@ -756,18 +731,14 @@ class Assembly:
         self,
         inter_file: FileLike,
         *,
-        dir: Union[str, Path] = ".",
+        dir: DirLike = ".",
     ) -> None:
         base = Path(dir)
-        if _is_fileobj(inter_file):
-            inter_source = inter_file
-            self.add_interactions(InteractionSet.read_list(self.ctype, inter_source, dir=base))
-        else:
-            inter_path = Path(inter_file)
-            if not inter_path.is_absolute():
-                inter_path = base / inter_path
-            _ensure_readable(inter_path)
-            self.add_interactions(InteractionSet.read_list(self.ctype, inter_path, dir=base))
+        inter_path = Path(inter_file)
+        if not inter_path.is_absolute():
+            inter_path = base / inter_path
+        _ensure_readable(inter_path)
+        self.add_interactions(InteractionSet.read_list(self.ctype, inter_path, dir=base))
         return
 
     def read_components(
@@ -775,38 +746,26 @@ class Assembly:
         comp_file: FileLike,
         type_file: FileLike,
         *,
-        dir: Union[str, Path] = ".",
+        dir: DirLike = ".",
     ) -> None:
         """
         Build an Assembly from a component list file and a component-type file.
         """
         base = Path(dir)
 
-        if _is_fileobj(comp_file):
-            comp_source = comp_file
-        else:
-            comp_path = Path(comp_file)
-            if not comp_path.is_absolute():
-                comp_path = base / comp_path
-            _ensure_readable(comp_path)
-            comp_source = comp_path
+        comp_path = Path(comp_file)
+        if not comp_path.is_absolute():
+            comp_path = base / comp_path
+        _ensure_readable(comp_path)
+        comp_source = comp_path
 
-        if _is_fileobj(type_file):
-            type_source = type_file
-            types = ComponentType.read_list(type_source, dir=base)
-        else:
-            type_path = Path(type_file)
-            if not type_path.is_absolute():
-                type_path = base / type_path
-            _ensure_readable(type_path)
-            types = ComponentType.read_list(type_path, dir=base)
+        type_path = Path(type_file)
+        if not type_path.is_absolute():
+            type_path = base / type_path
+        _ensure_readable(type_path)
+        types = ComponentType.read_list(type_path, dir=base)
 
-        if _is_fileobj(comp_source):
-            fh = comp_source
-            _need_close = False
-        else:
-            fh = Path(comp_source).open()
-            _need_close = True
+        fh = Path(comp_source).open()
         try:
             for ln, line in enumerate(fh, 1):
                 raw = line.strip()
@@ -830,8 +789,7 @@ class Assembly:
                 comp = Component(ctype=ctype, segment=segments)
                 self.add_component(comp)
         finally:
-            if _need_close:
-                fh.close()
+            fh.close()
 
         return self
 
@@ -1159,10 +1117,6 @@ class Assembly:
         self.sasa = sasa
 
 
-def _is_fileobj(f) -> bool:
-    return isinstance(f, (io.TextIOBase, io.BufferedIOBase, io.RawIOBase))
-
-
 def _resolve_path_candidates(p: Path, search_dirs: Sequence[Path]) -> Path:
     """
     Resolve `p` by trying:
@@ -1189,11 +1143,44 @@ def _resolve_path_candidates(p: Path, search_dirs: Sequence[Path]) -> Path:
     raise FileNotFoundError(msg)
 
 
+def _resolve_optional_file(
+    raw: str,
+    *,
+    base: Path,
+    list_dir: Path,
+) -> str:
+    """
+    Resolve a possibly-relative file path appearing inside a list file.
+
+    Search order:
+      1) as given (relative to CWD)
+      2) relative to base (dir=)
+      3) relative to list file directory
+    """
+    p = Path(raw)
+
+    if p.is_absolute():
+        return str(p)
+
+    # 1) CWD-relative (as written)
+    if p.is_file():
+        return str(p)
+
+    # 2) dir= base
+    cand = base / p
+    if cand.is_file():
+        return str(cand)
+
+    # 3) list file location
+    cand = list_dir / p
+    if cand.is_file():
+        return str(cand)
+
+    # Fallback (keeps previous behavior; will error later if unreadable)
+    return str(base / p)
+
+
 def _ensure_readable(f: FileLike) -> None:
-    if _is_fileobj(f):
-        if hasattr(f, "readable") and not f.readable():
-            raise OSError("File object is not readable")
-        return
     p = Path(f)
     if not p.is_file():
         raise FileNotFoundError(p)
