@@ -240,7 +240,7 @@ class COCOMO:
         params=None,  # default set from version
         eps=None,  # default set from version
         surfscale=None,  # default set from version
-        box=100,  # 100 or (50,20,40), nm
+        box=100 * nanometer,  # 100 or (50,20,40), nm
         cuton=2.9,  # nm
         cutoff=3.1,  # nm
         switching="original",  # 'original', 'openmm', or None
@@ -588,16 +588,21 @@ class COCOMO:
 
     def set_box(self, box) -> None:
         ax_nm, by_nm, cz_nm = self._normalize_box(box)
+        print(ax_nm, by_nm, cz_nm)
 
         a_sys = Vec3(ax_nm, 0.0, 0.0) * nanometer
         b_sys = Vec3(0.0, by_nm, 0.0) * nanometer
         c_sys = Vec3(0.0, 0.0, cz_nm) * nanometer
 
         # record on the class
-        self.box: tuple[float, float, float] = (ax_nm, by_nm, cz_nm)
+        self.box = (ax_nm, by_nm, cz_nm)
         self.box_vectors = (a_sys, b_sys, c_sys)
 
-        # set on topology and system
+        # set on system (CRITICAL for Context init)
+        if self.system is not None:
+            self.system.setDefaultPeriodicBoxVectors(a_sys, b_sys, c_sys)
+
+        # set on topology (use unitless Vec3 here, as before)
         a_top = Vec3(ax_nm, 0.0, 0.0)
         b_top = Vec3(0.0, by_nm, 0.0)
         c_top = Vec3(0.0, 0.0, cz_nm)
