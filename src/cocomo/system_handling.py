@@ -358,9 +358,26 @@ class Interaction:
     function: str = "switch"  # 'switch', 'Go', 'harmonic'
     parameter: float = 0.0  # extra parameter depending on function
 
+    # Optional angle gating (used for ring-like components)
+    angle: bool = False
+    angle_def: float = float(np.pi / 2.0)  # radians (90 deg default)
+    pgate: float = 2.0
+
+    # Optional centroid groups (global CA indices) defining ring frames
+    # A groups: (center, subunit1, subunit2)
+    frameA_center: list[int] = field(default_factory=list)
+    frameA1: list[int] = field(default_factory=list)
+    frameA2: list[int] = field(default_factory=list)
+
+    # B groups: (center, subunit1, subunit2)
+    frameB_center: list[int] = field(default_factory=list)
+    frameB1: list[int] = field(default_factory=list)
+    frameB2: list[int] = field(default_factory=list)
+
 
 @dataclass
 class InteractionSet:
+
     ctypeA: ComponentType = None
     ctypeB: ComponentType = None
 
@@ -372,6 +389,11 @@ class InteractionSet:
     value: Optional[str] = "asis"  # 'asis', 'logit', 'neglog'
     scale: Optional[float] = 1.0
     offset: Optional[float] = 0.0
+
+    # Optional orientation gate for ring-like components
+    angle: bool = False
+    angle_def: float = float(np.pi / 2.0)  # radians
+    pgate: float = 2.0
 
     defdist: Optional[float] = 0.8
     defprob: Optional[float] = 1.0
@@ -387,34 +409,43 @@ class InteractionSet:
         return msg
 
     def __post_init__(self) -> None:
-        # Parse options (robust, but minimal)
+        # Parse options (comma-separated; parentheses may contain commas)
         if self.options:
-            for s in (x.strip() for x in self.options.split(",")):
-                if not s:
+            for opt in _split_options(self.options):
+                if not opt:
                     continue
-                name, val = _parse_option_value(s)
-                if name == "exclusive":
+                name, vals = _parse_option_values(opt)
+                lname = name.lower()
+                v0 = float(vals[0]) if vals else 0.0
+
+                if lname == "exclusive":
                     self.mode = "exclusive"
-                elif name == "additive" or name == "all":
+                elif lname in {"additive", "all"}:
                     self.mode = "additive"
-                elif name.lower() == "switch":
+                elif lname == "switch":
                     self.function = "switch"
-                    self.parameter = float(val)
-                elif name.lower() == "go":
+                    self.parameter = v0
+                elif lname == "go":
                     self.function = "Go"
-                    self.parameter = float(val)
-                elif name.lower() == "harmonic":
+                    self.parameter = v0
+                elif lname == "harmonic":
                     self.function = "harmonic"
-                    self.parameter = float(val)
-                elif name in ("asis", "logit", "neglog"):
-                    self.value = name
-                    self.offset = float(val)
-                elif name == "distance" and val > 0:
-                    self.defdist = float(val)
-                elif name in ("prob", "probability") and val > 0:
-                    self.defprob = float(val)
-                elif name == "scale" and val > 0:
-                    self.scale = float(val)
+                    self.parameter = v0
+                elif lname in {"asis", "logit", "neglog"}:
+                    self.value = lname
+                    self.offset = v0
+                elif lname == "distance" and v0 > 0.0:
+                    self.defdist = v0
+                elif lname in {"prob", "probability"} and v0 > 0.0:
+                    self.defprob = v0
+                elif lname == "scale" and v0 > 0.0:
+                    self.scale = v0
+                elif lname == "angle":
+                    self.angle = True
+                    if vals:
+                        self.angle_def = _coerce_angle(vals[0])
+                    if len(vals) > 1 and float(vals[1]) > 0.0:
+                        self.pgate = float(vals[1])
 
         if self.contacttable:
             self.interactions = self._read_contact_table(self.contacttable)
@@ -500,6 +531,9 @@ class InteractionSet:
                             additive=(self.mode == "additive"),
                             function=self.function,
                             parameter=self.parameter,
+                            angle=bool(self.angle),
+                            angle_def=float(self.angle_def),
+                            pgate=float(self.pgate),
                         )
                     )
         finally:
@@ -637,7 +671,7 @@ class Assembly:
     # data structures for precomputing globally mapped values
     sasa: list[float] = field(default_factory=list)
     domains: list[list[int]] = field(default_factory=list)
-    interactions: list[int] = field(default_factory=list)
+    interactions: list[Interaction] = field(default_factory=list)
 
     def __repr__(self) -> str:
         msg = f"<assembly has {len(self.component)} components, {len(self.ctype)} types"
@@ -991,31 +1025,84 @@ class Assembly:
             self.interactions = interactions
             return
 
-        # Collect per-component mapping functions grouped by type name,
-        # preserving component instance order.
-        # Each entry is (comp_index, map_idx_callable)
+        SegInfo = list[tuple[str, int, int]]
 
-        def _make_map_fn(seginfo) -> Callable[[int], int]:
-            def map_fn(i: int) -> int:
+        def _make_map_fn(seginfo: SegInfo) -> Callable[[int], Optional[int]]:
+            def map_fn(i: int) -> Optional[int]:
                 return Assembly._map_component_index(int(i), seginfo)
 
             return map_fn
 
-        maps_by_type: dict[str, list[tuple[int, Callable[[int], int]]]] = {}
+        CompRec = tuple[int, Component, SegInfo, Callable[[int], Optional[int]]]
+        maps_by_type: dict[str, list[CompRec]] = {}
 
-        comp_idx = -1
+        comp_key = -1
         for comp in self.component:
-            # build seginfo only for components actually present
             seginfo = Assembly._comp_seginfo(comp.segment, seg_offsets)
             if not seginfo:
                 continue
-            comp_idx += 1
+            comp_key += 1
+            maps_by_type.setdefault(comp.ctype.name, []).append(
+                (comp_key, comp, seginfo, _make_map_fn(seginfo))
+            )
 
-            map_fn = _make_map_fn(seginfo)  # early-bind seginfo, no lambda assignment
-            maps_by_type.setdefault(comp.ctype.name, []).append((comp_idx, map_fn))
+        stride = 5
+        frame_cache: dict[int, tuple[list[int], list[int], list[int]]] = {}
 
-        # For each defined InteractionSet, expand to all present component pairs
-        # of the corresponding types. For identical types, use combinations (i<j).
+        def _subsample(vals: list[int]) -> list[int]:
+            if stride <= 1:
+                return vals
+            return vals[::stride]
+
+        def _frame_groups(rec: CompRec) -> tuple[list[int], list[int], list[int]]:
+            key, comp, seginfo, map_fn = rec
+            cached = frame_cache.get(key)
+            if cached is not None:
+                return cached
+
+            if len(seginfo) < 2:
+                raise ValueError("angle gating requires components with >=2 segments")
+
+            dom: list[int] = []
+            if comp.ctype.domainres:
+                local = sorted({int(i) for lst in comp.ctype.domainres for i in lst})
+                for i in local:
+                    g = map_fn(i)
+                    if g is not None:
+                        dom.append(int(g))
+            else:
+                for _seg, start, nres in seginfo:
+                    dom.extend(range(start, start + nres))
+
+            dom = sorted(set(dom))
+            if not dom:
+                for _seg, start, nres in seginfo:
+                    dom.extend(range(start, start + nres))
+                dom = sorted(set(dom))
+            if not dom:
+                raise ValueError("empty component; cannot build ring frame")
+
+            center = _subsample(dom) or [dom[0]]
+
+            def _subunit(k: int) -> list[int]:
+                _seg, start, nres = seginfo[k]
+                stop = start + nres
+                sub = [x for x in dom if start <= x < stop]
+                if not sub:
+                    sub = list(range(start, stop))
+                sub = _subsample(sub)
+                if not sub and nres > 0:
+                    sub = [start]
+                return sub
+
+            sub1 = _subunit(0)
+            sub2 = _subunit(1)
+            if not sub1 or not sub2:
+                raise ValueError("failed to build subunit frame groups for angle gating")
+
+            frame_cache[key] = (center, sub1, sub2)
+            return center, sub1, sub2
+
         for intset in self.interact.values():
             if not intset or not intset.ctypeA or not intset.ctypeB:
                 continue
@@ -1028,39 +1115,36 @@ class Assembly:
             if not listA or not listB:
                 continue
 
-            if nameA == nameB:
-                # same-type interactions: exclude self by pairing distinct instances only
-                comp_pairs = [
-                    (a_idx, a_map, b_idx, b_map)
-                    for (a_idx, a_map), (b_idx, b_map) in combinations(listA, 2)
-                ]
-            else:
-                # cross-type interactions: full Cartesian product
-                comp_pairs = [
-                    (a_idx, a_map, b_idx, b_map)
-                    for (a_idx, a_map) in listA
-                    for (b_idx, b_map) in listB
-                ]
-
-            if not comp_pairs:
-                continue
-
-            # Ensure we have template interactions from the set
             templates = intset.interactions or []
             if not templates:
                 continue
 
-            # Map each template Interaction's local pairs (i,j) to global indices
-            for a_idx, mapA, b_idx, mapB in comp_pairs:
+            want_angle = bool(getattr(intset, "angle", False))
+            angle_def = float(getattr(intset, "angle_def", float(np.pi / 2.0)))
+            pgate = float(getattr(intset, "pgate", 2.0))
+
+            if nameA == nameB:
+                comp_pairs = combinations(listA, 2)
+            else:
+                comp_pairs = ((a, b) for a in listA for b in listB)
+
+            for recA, recB in comp_pairs:
+                if want_angle:
+                    a_cen, a1, a2 = _frame_groups(recA)
+                    b_cen, b1, b2 = _frame_groups(recB)
+                else:
+                    a_cen, a1, a2 = [], [], []
+                    b_cen, b1, b2 = [], [], []
+
+                _keyA, _compA, _segA, mapA = recA
+                _keyB, _compB, _segB, mapB = recB
+
                 for tmpl in templates:
                     pair_set: set[tuple[int, int]] = set()
                     for i_local, j_local in tmpl.pairs or []:
                         gi = mapA(i_local)
                         gj = mapB(j_local)
-                        if gi is None or gj is None:
-                            continue
-                        # gi==gj cannot happen across distinct components; retain check anyway
-                        if gi == gj:
+                        if gi is None or gj is None or gi == gj:
                             continue
                         pair_set.add((int(gi), int(gj)))
 
@@ -1075,6 +1159,15 @@ class Assembly:
                             additive=bool(tmpl.additive),
                             function=str(tmpl.function),
                             parameter=float(tmpl.parameter),
+                            angle=want_angle,
+                            angle_def=angle_def,
+                            pgate=pgate,
+                            frameA_center=a_cen,
+                            frameA1=a1,
+                            frameA2=a2,
+                            frameB_center=b_cen,
+                            frameB1=b1,
+                            frameB2=b2,
                         )
                     )
 
@@ -1219,16 +1312,67 @@ def _parse_line(line: str) -> dict[str, str]:
     return out
 
 
-def _parse_option_value(s: str) -> tuple[str, float]:
+def _split_options(s: str) -> list[str]:
+    out: list[str] = []
+    buf: list[str] = []
+    depth = 0
+
+    for ch in s:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+
+        if ch == "," and depth == 0:
+            tok = "".join(buf).strip()
+            if tok:
+                out.append(tok)
+            buf = []
+            continue
+
+        buf.append(ch)
+
+    tok = "".join(buf).strip()
+    if tok:
+        out.append(tok)
+
+    return out
+
+
+def _parse_option_values(s: str) -> tuple[str, list[float]]:
     s = s.strip()
     if "(" not in s:
-        return s, 0.0
+        return s, []
+
     if not s.endswith(")"):
         raise ValueError(f"Invalid option(value): {s!r}")
+
     name, inner = s.split("(", 1)
     name = name.strip()
     if not name:
         raise ValueError("Empty option name")
+
     inner = inner[:-1].strip()  # drop trailing ')'
-    value = 0.0 if inner == "" else float(inner)
-    return name, value
+    if not inner:
+        return name, []
+
+    vals: list[float] = []
+    for part in inner.split(","):
+        part = part.strip()
+        if part:
+            vals.append(float(part))
+
+    return name, vals
+
+
+def _coerce_angle(v: float) -> float:
+    x = float(v)
+    if x > 2.0 * float(np.pi):
+        return float(np.deg2rad(x))
+    return x
+
+
+def _parse_option_value(s: str) -> tuple[str, float]:
+    name, vals = _parse_option_values(s)
+    v0 = float(vals[0]) if vals else 0.0
+    return name, v0

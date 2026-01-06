@@ -933,71 +933,208 @@ class COCOMO:
 
     def setupInteractionForce(self) -> None:
         """
-        Build CustomBondForce objects for pairwise interactions specified in
-        self.interactions (a list[Interaction] from system_handling).
+        Build interaction forces from `self.interactions` (list[Interaction] from system_handling).
 
         Implemented forms:
-
-        - 'switch':
-              V(r) = -eps / (1 + exp(alpha*(r - r0)))
-          where:
-              eps   ← Interaction.strength (energy scale)
-              r0    ← Interaction.distance [nm]
-              alpha ← Interaction.parameter if non-zero, else a default
-
-        - 'Go':
-              V(r) = eps * ((r0/r)**12 - 2*(r0/r)**6)
-          minimum at r = r0 with depth -eps.
-
-        - 'harmonic':
-              V(r) = 0.5 * k * (r - r0)**2
-          where k ← Interaction.strength (force constant).
-
-        All varying quantities are per-bond parameters; we use at most one
-        CustomBondForce per functional form to avoid the global-parameter
-        conflict that triggered the 'eps' error.
+        - 'switch': radial switched attraction (CustomBondForce)
+        - 'switch' + angle gate: switched attraction with orientation dependence
+          (CustomCentroidBondForce; requires frame groups on Interaction)
+        - 'Go': Go-like LJ 12-6 (CustomBondForce)
+        - 'harmonic': harmonic well (CustomBondForce)
         """
         if self.topology is None or not self.interactions:
             return
 
-        # Default alpha (1/nm) for switched potential if parameter == 0.0
-        def_alpha = 10.0
+        def_alpha = 10.0  # 1/nm
 
-        # Lazily created forces, one per functional form
         switch_force = None
+        switch_angle_force = None
         go_force = None
         harmonic_force = None
 
+        group_cache: dict[tuple[int, ...], int] = {}
+
+        def _gid(force: CustomCentroidBondForce, atoms: Sequence[int]) -> int:
+            key = tuple(sorted(int(i) for i in atoms))
+            if not key:
+                raise ValueError("Empty centroid group for angle-gated interaction")
+            gid = group_cache.get(key)
+            if gid is not None:
+                return gid
+            gid = force.addGroup(list(key), [1.0] * len(key))
+            group_cache[key] = gid
+            return gid
+
         for intr in self.interactions:
-            if not intr.pairs:
+            if not getattr(intr, "pairs", None):
                 continue
 
-            func = (intr.function or "switch").lower()
-            strength = float(intr.strength)
-            r0 = float(intr.distance)
+            func = (getattr(intr, "function", None) or "switch").lower()
+            strength = float(getattr(intr, "strength", 0.0))
+            r0 = float(getattr(intr, "distance", 0.0))
 
             if func == "switch":
-                # Create the force on first use
+                alpha = float(getattr(intr, "parameter", 0.0) or 0.0)
+                if alpha == 0.0:
+                    alpha = def_alpha
+
+                use_angle = bool(getattr(intr, "angle", False))
+                if use_angle:
+                    if not self.box or len(self.box) != 3:
+                        raise ValueError("Angle-gated switch requires an orthorhombic box")
+
+                    a_cen = list(getattr(intr, "frameA_center", []))
+                    a1 = list(getattr(intr, "frameA1", []))
+                    a2 = list(getattr(intr, "frameA2", []))
+                    b_cen = list(getattr(intr, "frameB_center", []))
+                    b1 = list(getattr(intr, "frameB1", []))
+                    b2 = list(getattr(intr, "frameB2", []))
+
+                    if not (a_cen and a1 and a2 and b_cen and b1 and b2):
+                        raise ValueError("Angle-gated switch missing ring frame groups")
+
+                    ang = float(getattr(intr, "angle_def", float(np.pi / 2.0)))
+                    if ang > 2.0 * float(np.pi):
+                        ang = float(np.deg2rad(ang))
+                    cad = float(np.cos(ang))
+                    sad = float(np.sin(ang))
+                    pgate = float(getattr(intr, "pgate", 2.0))
+
+                    if switch_angle_force is None:
+                        lx, ly, lz = map(float, self.box)
+
+                        terms = [
+                            "-eps/(1+exp(u))*gate",
+                            # gate + switch variable
+                            "gate=(scoreA2*scoreB2)^pgate",
+                            "u=min(max(alpha*(dist-r0),-50),50)",
+                            "dist=sqrt(rsq)",
+                            # --- ring A score (uses must precede defs) ---
+                            "scoreA2=scoreA*scoreA",
+                            "scoreA=cosA*cad+sqrt(sinA2)*sad",
+                            "sinA2=max(0,1-cosA2)",
+                            "cosA2=min(1,cosA*cosA)",
+                            "cosA=min(1,abs(dotA)/sqrt(nA2*rsq))",
+                            "dotA=nAx*dx+nAy*dy+nAz*dz",
+                            "nA2=nAx*nAx+nAy*nAy+nAz*nAz+1e-8",
+                            "nAx=a1y*a2z-a1z*a2y",
+                            "nAy=a1z*a2x-a1x*a2z",
+                            "nAz=a1x*a2y-a1y*a2x",
+                            "a1x=a1x0-Lx*floor(a1x0/Lx+0.5)",
+                            "a1y=a1y0-Ly*floor(a1y0/Ly+0.5)",
+                            "a1z=a1z0-Lz*floor(a1z0/Lz+0.5)",
+                            "a2x=a2x0-Lx*floor(a2x0/Lx+0.5)",
+                            "a2y=a2y0-Ly*floor(a2y0/Ly+0.5)",
+                            "a2z=a2z0-Lz*floor(a2z0/Lz+0.5)",
+                            "a1x0=x4-x3",
+                            "a1y0=y4-y3",
+                            "a1z0=z4-z3",
+                            "a2x0=x5-x3",
+                            "a2y0=y5-y3",
+                            "a2z0=z5-z3",
+                            # --- ring B score ---
+                            "scoreB2=scoreB*scoreB",
+                            "scoreB=cosB*cad+sqrt(sinB2)*sad",
+                            "sinB2=max(0,1-cosB2)",
+                            "cosB2=min(1,cosB*cosB)",
+                            "cosB=min(1,abs(dotB)/sqrt(nB2*rsq))",
+                            "dotB=nBx*dx+nBy*dy+nBz*dz",
+                            "nB2=nBx*nBx+nBy*nBy+nBz*nBz+1e-8",
+                            "nBx=b1y*b2z-b1z*b2y",
+                            "nBy=b1z*b2x-b1x*b2z",
+                            "nBz=b1x*b2y-b1y*b2x",
+                            "b1x=b1x0-Lx*floor(b1x0/Lx+0.5)",
+                            "b1y=b1y0-Ly*floor(b1y0/Ly+0.5)",
+                            "b1z=b1z0-Lz*floor(b1z0/Lz+0.5)",
+                            "b2x=b2x0-Lx*floor(b2x0/Lx+0.5)",
+                            "b2y=b2y0-Ly*floor(b2y0/Ly+0.5)",
+                            "b2z=b2z0-Lz*floor(b2z0/Lz+0.5)",
+                            "b1x0=x7-x6",
+                            "b1y0=y7-y6",
+                            "b1z0=z7-z6",
+                            "b2x0=x8-x6",
+                            "b2y0=y8-y6",
+                            "b2z0=z8-z6",
+                            # --- site-site minimum-image distance (defined last) ---
+                            "rsq=dx*dx+dy*dy+dz*dz+1e-8",
+                            "dx=dx0-Lx*floor(dx0/Lx+0.5)",
+                            "dy=dy0-Ly*floor(dy0/Ly+0.5)",
+                            "dz=dz0-Lz*floor(dz0/Lz+0.5)",
+                            "dx0=x2-x1",
+                            "dy0=y2-y1",
+                            "dz0=z2-z1",
+                        ]
+
+                        eq = "; ".join(terms)
+
+                        f = CustomCentroidBondForce(8, eq)
+                        f.addGlobalParameter("Lx", lx * nanometer)
+                        f.addGlobalParameter("Ly", ly * nanometer)
+                        f.addGlobalParameter("Lz", lz * nanometer)
+
+                        f.addPerBondParameter("eps")
+                        f.addPerBondParameter("r0")
+                        f.addPerBondParameter("alpha")
+                        f.addPerBondParameter("cad")
+                        f.addPerBondParameter("sad")
+                        f.addPerBondParameter("pgate")
+
+                        f.setUsesPeriodicBoundaryConditions(True)
+                        f.setName("interaction_switch_angle")
+                        switch_angle_force = f
+
+                    gid_a_cen = _gid(switch_angle_force, a_cen)
+                    gid_a1 = _gid(switch_angle_force, a1)
+                    gid_a2 = _gid(switch_angle_force, a2)
+                    gid_b_cen = _gid(switch_angle_force, b_cen)
+                    gid_b1 = _gid(switch_angle_force, b1)
+                    gid_b2 = _gid(switch_angle_force, b2)
+
+                    for i, j in intr.pairs:
+                        if i == j:
+                            continue
+                        gid_i = _gid(switch_angle_force, [int(i)])
+                        gid_j = _gid(switch_angle_force, [int(j)])
+
+                        switch_angle_force.addBond(
+                            [
+                                gid_i,
+                                gid_j,
+                                gid_a_cen,
+                                gid_a1,
+                                gid_a2,
+                                gid_b_cen,
+                                gid_b1,
+                                gid_b2,
+                            ],
+                            [
+                                strength * kilojoule / mole,
+                                r0 * nanometer,
+                                alpha / nanometer,
+                                cad,
+                                sad,
+                                pgate,
+                            ],
+                        )
+                    continue
+
+                # --- non-gated switch (radial) -------------------------------
                 if switch_force is None:
                     equation = "-eps/(1+exp(y)); "
                     equation += "y = min(max(x, -50), 50); "
                     equation += "x = alpha*(r-r0);"
                     f = CustomBondForce(equation)
-                    f.addPerBondParameter("eps")  # energy
-                    f.addPerBondParameter("r0")  # nm
-                    f.addPerBondParameter("alpha")  # 1/nm
+                    f.addPerBondParameter("eps")
+                    f.addPerBondParameter("r0")
+                    f.addPerBondParameter("alpha")
                     f.setUsesPeriodicBoundaryConditions(True)
                     f.setName("interaction_switch")
                     switch_force = f
-
-                # Choose alpha: interaction.parameter if non-zero, else default
-                alpha = float(intr.parameter) if intr.parameter not in (None, 0.0) else def_alpha
 
                 for i, j in intr.pairs:
                     if i == j:
                         continue
                     ia, jb = (int(i), int(j))
-                    # consistent ordering is not strictly needed for bonds but doesn’t hurt
                     if ia > jb:
                         ia, jb = jb, ia
 
@@ -1015,8 +1152,8 @@ class COCOMO:
                 if go_force is None:
                     equation = "eps*((r0/r)^12 - 2*(r0/r)^6)"
                     f = CustomBondForce(equation)
-                    f.addPerBondParameter("eps")  # energy
-                    f.addPerBondParameter("r0")  # nm
+                    f.addPerBondParameter("eps")
+                    f.addPerBondParameter("r0")
                     f.setUsesPeriodicBoundaryConditions(True)
                     f.setName("interaction_go")
                     go_force = f
@@ -1041,8 +1178,8 @@ class COCOMO:
                 if harmonic_force is None:
                     equation = "0.5*k*(r-r0)^2"
                     f = CustomBondForce(equation)
-                    f.addPerBondParameter("k")  # energy / nm^2
-                    f.addPerBondParameter("r0")  # nm
+                    f.addPerBondParameter("k")
+                    f.addPerBondParameter("r0")
                     f.setUsesPeriodicBoundaryConditions(True)
                     f.setName("interaction_harmonic")
                     harmonic_force = f
@@ -1065,12 +1202,14 @@ class COCOMO:
 
             else:
                 warnings.warn(f"Unknown interaction function {intr.function!r}; skipping.")
-                continue
 
-        # Register forces with the System and self.forces dict
         if switch_force is not None:
             self.system.addForce(switch_force)
             self.forces["interaction_switch"] = switch_force
+
+        if switch_angle_force is not None:
+            self.system.addForce(switch_angle_force)
+            self.forces["interaction_switch_angle"] = switch_angle_force
 
         if go_force is not None:
             self.system.addForce(go_force)
