@@ -264,6 +264,7 @@ class COCOMO:
         self.velocities = None
         self.box = None
         self.box_vectors = None
+        self.parameters = None
 
         self.params = params
         self.eps = eps
@@ -349,6 +350,10 @@ class COCOMO:
             self.positions = state.getPositions()
             self.velocities = state.getVelocities()
             self.box_vectors = state.getPeriodicBoxVectors()
+            try:
+                self.parameters = dict(state.getParameters())
+            except Exception:
+                self.parameters = None
 
     def write_pdb(self, fname="state.pdb"):
         positions = self.simulation.context.getState(getPositions=True).getPositions()
@@ -559,6 +564,10 @@ class COCOMO:
         if self.box_vectors:
             a, b, c = self.box_vectors
             self.simulation.context.setPeriodicBoxVectors(a, b, c)
+
+        if self.parameters:
+            for name, value in self.parameters.items():
+                self.simulation.context.setParameter(name, float(value))
 
     def set_positions(self, positions) -> None:
         self.positions = positions
