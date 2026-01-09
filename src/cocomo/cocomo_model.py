@@ -444,6 +444,119 @@ class COCOMO:
         def __del__(self):
             self.file.close()
 
+    class DiagnosticsReporter:
+        def __init__(
+            self,
+            file: str,
+            reportInterval: int,
+            groups: Mapping[str, int],
+            *,
+            force_limit: float | None = None,
+            dump_prefix: str | None = None,
+        ) -> None:
+            """Diagnostics logger for energy and max force.
+
+            Parameters
+            ----------
+            file
+                Output filename.
+            reportInterval
+                Reporting interval in steps.
+            groups
+                Mapping of force labels to force group indices.
+            force_limit
+                If set, dump state and raise RuntimeError when max |F| exceeds this
+                value in kJ/mol/nm.
+            dump_prefix
+                Prefix for writing the dumped state XML file.
+            """
+            self.file = open(file, "w")
+            self.interval = int(reportInterval)
+            self.groups = dict(groups)
+            self.force_limit = force_limit
+            self.dump_prefix = dump_prefix
+
+            header = [
+                "Step",
+                "PotE(kJ/mol)",
+                "MaxF(kJ/mol/nm)",
+            ]
+            for name in self.groups:
+                header.append(f"{name}_E")
+                header.append(f"{name}_MaxF")
+            self.file.write(" ".join(header) + "\n")
+
+        def describeNextReport(self, simulation):
+            return (self.interval, False, False, False, False)
+
+        @staticmethod
+        def _forces_to_array(forces) -> np.ndarray:
+            if hasattr(forces, "value_in_unit"):
+                arr = forces.value_in_unit(kilojoule / (mole * nanometer))
+                return np.asarray(arr, dtype=float)
+            out = np.empty((len(forces), 3), dtype=float)
+            for i, v in enumerate(forces):
+                out[i, 0] = float(v.x)
+                out[i, 1] = float(v.y)
+                out[i, 2] = float(v.z)
+            return out
+
+        def _max_force(self, simulation, mask: int | None = None) -> float:
+            if mask is None:
+                st = simulation.context.getState(getForces=True)
+            else:
+                st = simulation.context.getState(getForces=True, groups=mask)
+            arr = self._forces_to_array(st.getForces())
+            if arr.size == 0:
+                return 0.0
+            return float(np.linalg.norm(arr, axis=1).max())
+
+        def _dump_state(self, simulation) -> str | None:
+            if not self.dump_prefix:
+                return None
+            fname = f"{self.dump_prefix}_step{simulation.currentStep}.xml"
+            simulation.saveState(fname)
+            return fname
+
+        def report(self, simulation, state) -> None:
+            st = simulation.context.getState(getEnergy=True)
+            pot = st.getPotentialEnergy().value_in_unit(kilojoule / mole)
+            maxf = self._max_force(simulation)
+
+            fields: list[str] = [
+                str(int(simulation.currentStep)),
+                f"{pot:.8f}",
+                f"{maxf:.8f}",
+            ]
+
+            for name, group in self.groups.items():
+                mask = 1 << int(group)
+                e = simulation.context.getState(getEnergy=True, groups=mask)
+                eg = e.getPotentialEnergy().value_in_unit(kilojoule / mole)
+                fg = self._max_force(simulation, mask)
+                fields.append(f"{eg:.8f}")
+                fields.append(f"{fg:.8f}")
+
+            self.file.write(" ".join(fields) + "\n")
+            self.file.flush()
+
+            if self.force_limit is None:
+                return
+            if maxf <= float(self.force_limit):
+                return
+
+            dumped = self._dump_state(simulation)
+            msg = f"Force limit exceeded at step {simulation.currentStep}"
+            if dumped:
+                msg += f"; dumped state to {dumped}"
+            raise RuntimeError(msg)
+
+        def __del__(self) -> None:
+            try:
+                self.file.close()
+            except Exception:
+                pass
+
     def simulate(
         self, *, nstep=1000, nout=1000, logfile=None, dcdfile=None, elogfile=None, forcelist=None
     ):
@@ -991,6 +1104,7 @@ class COCOMO:
         Implemented forms:
         - 'switch': radial switched attraction (CustomBondForce)
         - 'switch' + angle gate: switched attraction with orientation dependence
+          (softened with optional rsoft; requires frame groups on Interaction)
           (CustomCentroidBondForce; requires frame groups on Interaction)
         - 'Go': Go-like LJ 12-6 (CustomBondForce)
         - 'harmonic': harmonic well (CustomBondForce)
@@ -1053,23 +1167,29 @@ class COCOMO:
                     sad = float(np.sin(ang))
                     pgate = float(getattr(intr, "pgate", 2.0))
 
+                    rsoft = float(getattr(intr, "rsoft", 0.0) or 0.0)
+                    if rsoft <= 0.0:
+                        rsoft = 0.2 * r0 if r0 > 0.0 else 0.2
+
                     if switch_angle_force is None:
                         lx, ly, lz = map(float, self.box)
 
                         terms = [
-                            "-eps/(1+exp(u))*gate",
+                            "-eps/(1+exp(u))*gate*wdist",
+                            "wdist=rsq0/(rsq0+rsoft2)",
+                            "rsoft2=rsoft*rsoft",
                             "gate=(scoreA2*scoreB2)^pgate",
                             "u=min(max(alpha*(dist-r0),-50),50)",
                             "dist=sqrt(rsq)",
                             # --- ring A score ---
                             "scoreA2=scoreA*scoreA",
                             "scoreA=cosA*cad+sqrt(sinA2)*sad",
-                            "sinA2=max(0,1-cosA2)",
-                            "cosA2=min(1,cosA*cosA)",
+                            "cosA2=cosA*cosA",
+                            "sinA2=1-cosA2",
                             "absDotA=sqrt(dotA*dotA+1e-12)",
                             "cosA=min(1,absDotA/sqrt(nA2*rsq))",
                             "dotA=nAx*dx+nAy*dy+nAz*dz",
-                            "nA2=nAx*nAx+nAy*nAy+nAz*nAz+1e-6",
+                            "nA2=nAx*nAx+nAy*nAy+nAz*nAz+1e-4",
                             "nAx=a1y*a2z-a1z*a2y",
                             "nAy=a1z*a2x-a1x*a2z",
                             "nAz=a1x*a2y-a1y*a2x",
@@ -1088,12 +1208,12 @@ class COCOMO:
                             # --- ring B score ---
                             "scoreB2=scoreB*scoreB",
                             "scoreB=cosB*cad+sqrt(sinB2)*sad",
-                            "sinB2=max(0,1-cosB2)",
-                            "cosB2=min(1,cosB*cosB)",
+                            "cosB2=cosB*cosB",
+                            "sinB2=1-cosB2",
                             "absDotB=sqrt(dotB*dotB+1e-12)",
                             "cosB=min(1,absDotB/sqrt(nB2*rsq))",
                             "dotB=nBx*dx+nBy*dy+nBz*dz",
-                            "nB2=nBx*nBx+nBy*nBy+nBz*nBz+1e-6",
+                            "nB2=nBx*nBx+nBy*nBy+nBz*nBz+1e-4",
                             "nBx=b1y*b2z-b1z*b2y",
                             "nBy=b1z*b2x-b1x*b2z",
                             "nBz=b1x*b2y-b1y*b2x",
@@ -1110,7 +1230,8 @@ class COCOMO:
                             "b2y0=y8-y6",
                             "b2z0=z8-z6",
                             # --- site-site minimum-image distance ---
-                            "rsq=dx*dx+dy*dy+dz*dz+1e-6",
+                            "rsq=rsq0+1e-4",
+                            "rsq0=dx*dx+dy*dy+dz*dz",
                             "dx=dx0-Lx*floor(dx0/Lx+0.5)",
                             "dy=dy0-Ly*floor(dy0/Ly+0.5)",
                             "dz=dz0-Lz*floor(dz0/Lz+0.5)",
@@ -1132,6 +1253,7 @@ class COCOMO:
                         f.addPerBondParameter("cad")
                         f.addPerBondParameter("sad")
                         f.addPerBondParameter("pgate")
+                        f.addPerBondParameter("rsoft")
 
                         f.setUsesPeriodicBoundaryConditions(True)
                         f.setName("interaction_switch_angle")
@@ -1177,6 +1299,7 @@ class COCOMO:
                                 cad,
                                 sad,
                                 pgate,
+                                rsoft * nanometer,
                             ],
                         )
                     continue
