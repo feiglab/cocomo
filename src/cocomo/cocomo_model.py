@@ -652,6 +652,7 @@ class COCOMO:
         velocities=None,
         resetvelocities=False,
         box=None,
+        deterministicforces=False,
     ) -> None:
         # temperature: in K
         # tstep: in ps
@@ -690,7 +691,15 @@ class COCOMO:
             self.resources = "CPU"
 
         if self.resources == "CUDA":
-            prop = dict(CudaPrecision="mixed", CudaDeviceIndex=str(device))
+            if deterministicforces:
+                prop = {
+                    "CudaPrecision": "mixed",
+                    "CudaDeviceIndex": str(device),
+                    "DeterministicForces": "true",
+                }
+            else:
+                prop = dict(CudaPrecision="mixed", CudaDeviceIndex=str(device))
+
             self.simulation = Simulation(
                 self.topology, self.system, self.integrator, self.platform, prop
             )
