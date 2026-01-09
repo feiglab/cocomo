@@ -28,6 +28,7 @@ from openmm import (
     XmlSerializer,
 )
 from openmm.app import (
+    CheckpointReporter,
     DCDReporter,
     PDBFile,
     Simulation,
@@ -580,6 +581,7 @@ class COCOMO:
         logfile=None,
         dcdfile=None,
         elogfile=None,
+        chkfile=None,
         diagfile=None,
         forcelist=None,
         force_limit=None,
@@ -619,6 +621,8 @@ class COCOMO:
                     dump_prefix=dump_prefix,
                 )
                 self.simulation.reporters.append(diag)
+            if chkfile:
+                self.simulation.reporters.append(CheckpointReporter(chkfile, nout))
             self.simulation.step(nstep)
 
     def set_sasa(self, sasa=None):
