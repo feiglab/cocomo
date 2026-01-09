@@ -573,6 +573,46 @@ class COCOMO:
                     continue
                 ctx.setParameter(name, float(value))
 
+        self._sync_angle_switch_box_globals()
+
+    def _sync_angle_switch_box_globals(self) -> None:
+        if self.simulation is None:
+            return
+        if not getattr(self, "forces", None):
+            return
+        if "interaction_switch_angle" not in self.forces:
+            return
+
+        def _xyz_nm(v) -> tuple[float, float, float]:
+            if hasattr(v, "value_in_unit"):
+                v = v.value_in_unit(nanometer)
+            if hasattr(v, "x"):
+                return float(v.x), float(v.y), float(v.z)
+            return float(v[0]), float(v[1]), float(v[2])
+
+        ctx = self.simulation.context
+        st = ctx.getState()
+        a, b, c = st.getPeriodicBoxVectors()
+
+        ax, ay, az = _xyz_nm(a)
+        bx, by, bz = _xyz_nm(b)
+        cx, cy, cz = _xyz_nm(c)
+
+        tol = 1e-6
+        if abs(ay) > tol or abs(az) > tol or abs(bx) > tol or abs(bz) > tol:
+            raise ValueError("Angle-gated switch requires orthorhombic box vectors")
+        if abs(cx) > tol or abs(cy) > tol:
+            raise ValueError("Angle-gated switch requires orthorhombic box vectors")
+
+        lx, ly, lz = ax, by, cz
+        if lx <= 0.0 or ly <= 0.0 or lz <= 0.0:
+            raise ValueError("Invalid periodic box lengths")
+
+        ctx.setParameter("Lx", float(lx))
+        ctx.setParameter("Ly", float(ly))
+        ctx.setParameter("Lz", float(lz))
+        self.box = (float(lx), float(ly), float(lz))
+
     def set_positions(self, positions) -> None:
         self.positions = positions
         if self.simulation is not None:
@@ -1018,18 +1058,18 @@ class COCOMO:
 
                         terms = [
                             "-eps/(1+exp(u))*gate",
-                            # gate + switch variable
                             "gate=(scoreA2*scoreB2)^pgate",
                             "u=min(max(alpha*(dist-r0),-50),50)",
                             "dist=sqrt(rsq)",
-                            # --- ring A score (uses must precede defs) ---
+                            # --- ring A score ---
                             "scoreA2=scoreA*scoreA",
                             "scoreA=cosA*cad+sqrt(sinA2)*sad",
                             "sinA2=max(0,1-cosA2)",
                             "cosA2=min(1,cosA*cosA)",
-                            "cosA=min(1,abs(dotA)/sqrt(nA2*rsq))",
+                            "absDotA=sqrt(dotA*dotA+1e-12)",
+                            "cosA=min(1,absDotA/sqrt(nA2*rsq))",
                             "dotA=nAx*dx+nAy*dy+nAz*dz",
-                            "nA2=nAx*nAx+nAy*nAy+nAz*nAz+1e-8",
+                            "nA2=nAx*nAx+nAy*nAy+nAz*nAz+1e-6",
                             "nAx=a1y*a2z-a1z*a2y",
                             "nAy=a1z*a2x-a1x*a2z",
                             "nAz=a1x*a2y-a1y*a2x",
@@ -1050,9 +1090,10 @@ class COCOMO:
                             "scoreB=cosB*cad+sqrt(sinB2)*sad",
                             "sinB2=max(0,1-cosB2)",
                             "cosB2=min(1,cosB*cosB)",
-                            "cosB=min(1,abs(dotB)/sqrt(nB2*rsq))",
+                            "absDotB=sqrt(dotB*dotB+1e-12)",
+                            "cosB=min(1,absDotB/sqrt(nB2*rsq))",
                             "dotB=nBx*dx+nBy*dy+nBz*dz",
-                            "nB2=nBx*nBx+nBy*nBy+nBz*nBz+1e-8",
+                            "nB2=nBx*nBx+nBy*nBy+nBz*nBz+1e-6",
                             "nBx=b1y*b2z-b1z*b2y",
                             "nBy=b1z*b2x-b1x*b2z",
                             "nBz=b1x*b2y-b1y*b2x",
@@ -1068,8 +1109,8 @@ class COCOMO:
                             "b2x0=x8-x6",
                             "b2y0=y8-y6",
                             "b2z0=z8-z6",
-                            # --- site-site minimum-image distance (defined last) ---
-                            "rsq=dx*dx+dy*dy+dz*dz+1e-8",
+                            # --- site-site minimum-image distance ---
+                            "rsq=dx*dx+dy*dy+dz*dz+1e-6",
                             "dx=dx0-Lx*floor(dx0/Lx+0.5)",
                             "dy=dy0-Ly*floor(dy0/Ly+0.5)",
                             "dz=dz0-Lz*floor(dz0/Lz+0.5)",
@@ -1103,11 +1144,20 @@ class COCOMO:
                     gid_b1 = _gid(switch_angle_force, b1)
                     gid_b2 = _gid(switch_angle_force, b2)
 
+                    seen: set[tuple[int, int]] = set()
                     for i, j in intr.pairs:
-                        if i == j:
+                        ia, jb = int(i), int(j)
+                        if ia == jb:
                             continue
-                        gid_i = _gid(switch_angle_force, [int(i)])
-                        gid_j = _gid(switch_angle_force, [int(j)])
+                        if ia > jb:
+                            ia, jb = jb, ia
+                        key = (ia, jb)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+
+                        gid_i = _gid(switch_angle_force, [ia])
+                        gid_j = _gid(switch_angle_force, [jb])
 
                         switch_angle_force.addBond(
                             [
@@ -1144,12 +1194,17 @@ class COCOMO:
                     f.setName("interaction_switch")
                     switch_force = f
 
+                seen: set[tuple[int, int]] = set()
                 for i, j in intr.pairs:
-                    if i == j:
-                        continue
                     ia, jb = (int(i), int(j))
+                    if ia == jb:
+                        continue
                     if ia > jb:
                         ia, jb = jb, ia
+                    key = (ia, jb)
+                    if key in seen:
+                        continue
+                    seen.add(key)
 
                     switch_force.addBond(
                         ia,
@@ -1171,12 +1226,17 @@ class COCOMO:
                     f.setName("interaction_go")
                     go_force = f
 
+                seen: set[tuple[int, int]] = set()
                 for i, j in intr.pairs:
-                    if i == j:
-                        continue
                     ia, jb = (int(i), int(j))
+                    if ia == jb:
+                        continue
                     if ia > jb:
                         ia, jb = jb, ia
+                    key = (ia, jb)
+                    if key in seen:
+                        continue
+                    seen.add(key)
 
                     go_force.addBond(
                         ia,
@@ -1197,12 +1257,17 @@ class COCOMO:
                     f.setName("interaction_harmonic")
                     harmonic_force = f
 
+                seen: set[tuple[int, int]] = set()
                 for i, j in intr.pairs:
-                    if i == j:
-                        continue
                     ia, jb = (int(i), int(j))
+                    if ia == jb:
+                        continue
                     if ia > jb:
                         ia, jb = jb, ia
+                    key = (ia, jb)
+                    if key in seen:
+                        continue
+                    seen.add(key)
 
                     harmonic_force.addBond(
                         ia,
