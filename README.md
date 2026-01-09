@@ -7,7 +7,7 @@ COCOMO is the COncentration-dependent COarse-grained MOdel.
 
 This is a package for installation with pip:
 
-pip install -e .
+pip install .
 
 
 Legacy scripts can be found under legacy/
