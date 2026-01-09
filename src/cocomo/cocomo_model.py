@@ -1151,7 +1151,6 @@ class COCOMO:
         Implemented forms:
         - 'switch': radial switched attraction (CustomBondForce)
         - 'switch' + angle gate: switched attraction with orientation dependence
-          (softened with optional rsoft; requires frame groups on Interaction)
           (CustomCentroidBondForce; requires frame groups on Interaction)
         - 'Go': Go-like LJ 12-6 (CustomBondForce)
         - 'harmonic': harmonic well (CustomBondForce)
@@ -1219,36 +1218,31 @@ class COCOMO:
                         )
                         pgate = 1.0
 
-                    rsoft = float(getattr(intr, "rsoft", 0.0) or 0.0)
-                    if rsoft <= 0.0:
-                        rsoft = 0.5 * r0 if r0 > 0.0 else 0.2
-
                     if switch_angle_force is None:
                         lx, ly, lz = map(float, self.box)
 
                         terms = [
-                            "-eps/(1+exp(u))*gate*wdist",
-                            "wdist=rsq0/(rsq0+rsoft2)",
-                            "rsoft2=rsoft*rsoft",
-                            # gate: smooth at 0/1, no sqrt(sin) terms
-                            "gate=g*g*(3-2*g)",
-                            "g=(scoreA2*scoreB2)^pgate",
-                            "scoreA2=cad2*cosA2+sad2*sinA2",
-                            "scoreB2=cad2*cosB2+sad2*sinB2",
-                            "cad2=cad*cad",
-                            "sad2=sad*sad",
+                            "-eps/(1+exp(u))*gate",
                             "u=min(max(alpha*(dist-r0),-50),50)",
                             "dist=sqrt(rsq)",
-                            # --- ring A score (soft) ---
-                            "sinA2=1-cosA2",
-                            "cosA2=1-posdA",
-                            "posdA=0.5*(dA+sqrt(dA*dA+1e-6))",
-                            "dA=1-cosA2r",
-                            "cosA2r=dotA2/denA",
-                            "denA=nA2*rsq+1e-6",
-                            "dotA2=dotA*dotA",
+                            "rsq=dx*dx+dy*dy+dz*dz+1e-6",
+                            "g0=scoreA2*scoreB2",
+                            "g1=min(1,max(0,g0))",
+                            "gate0=g1^pgate",
+                            "gate=gate0*gate0*(3-2*gate0)",
+                            "scoreA2=scoreA*scoreA",
+                            "scoreA=cosA*cad+sinA*sad",
+                            "cosA=absDotA/denA",
+                            "sinA=magCrossA/denA",
+                            "denA=sqrt(nA2*rsq+1e-6)",
+                            "absDotA=sqrt(dotA*dotA+1e-6)-0.001",
+                            "magCrossA=sqrt(crossA2+1e-6)-0.001",
+                            "crossA2=cAx*cAx+cAy*cAy+cAz*cAz",
+                            "cAx=nAy*dz-nAz*dy",
+                            "cAy=nAz*dx-nAx*dz",
+                            "cAz=nAx*dy-nAy*dx",
                             "dotA=nAx*dx+nAy*dy+nAz*dz",
-                            "nA2=nAx*nAx+nAy*nAy+nAz*nAz+1e-4",
+                            "nA2=nAx*nAx+nAy*nAy+nAz*nAz",
                             "nAx=a1y*a2z-a1z*a2y",
                             "nAy=a1z*a2x-a1x*a2z",
                             "nAz=a1x*a2y-a1y*a2x",
@@ -1264,16 +1258,19 @@ class COCOMO:
                             "a2x0=x5-x3",
                             "a2y0=y5-y3",
                             "a2z0=z5-z3",
-                            # --- ring B score (soft) ---
-                            "sinB2=1-cosB2",
-                            "cosB2=1-posdB",
-                            "posdB=0.5*(dB+sqrt(dB*dB+1e-6))",
-                            "dB=1-cosB2r",
-                            "cosB2r=dotB2/denB",
-                            "denB=nB2*rsq+1e-6",
-                            "dotB2=dotB*dotB",
+                            "scoreB2=scoreB*scoreB",
+                            "scoreB=cosB*cad+sinB*sad",
+                            "cosB=absDotB/denB",
+                            "sinB=magCrossB/denB",
+                            "denB=sqrt(nB2*rsq+1e-6)",
+                            "absDotB=sqrt(dotB*dotB+1e-6)-0.001",
+                            "magCrossB=sqrt(crossB2+1e-6)-0.001",
+                            "crossB2=cBx*cBx+cBy*cBy+cBz*cBz",
+                            "cBx=nBy*dz-nBz*dy",
+                            "cBy=nBz*dx-nBx*dz",
+                            "cBz=nBx*dy-nBy*dx",
                             "dotB=nBx*dx+nBy*dy+nBz*dz",
-                            "nB2=nBx*nBx+nBy*nBy+nBz*nBz+1e-4",
+                            "nB2=nBx*nBx+nBy*nBy+nBz*nBz",
                             "nBx=b1y*b2z-b1z*b2y",
                             "nBy=b1z*b2x-b1x*b2z",
                             "nBz=b1x*b2y-b1y*b2x",
@@ -1289,9 +1286,6 @@ class COCOMO:
                             "b2x0=x8-x6",
                             "b2y0=y8-y6",
                             "b2z0=z8-z6",
-                            # --- site-site minimum-image distance ---
-                            "rsq=rsq0+1e-6",
-                            "rsq0=dx*dx+dy*dy+dz*dz",
                             "dx=dx0-Lx*floor(dx0/Lx+0.5)",
                             "dy=dy0-Ly*floor(dy0/Ly+0.5)",
                             "dz=dz0-Lz*floor(dz0/Lz+0.5)",
@@ -1313,7 +1307,6 @@ class COCOMO:
                         f.addPerBondParameter("cad")
                         f.addPerBondParameter("sad")
                         f.addPerBondParameter("pgate")
-                        f.addPerBondParameter("rsoft")
 
                         f.setUsesPeriodicBoundaryConditions(True)
                         f.setName("interaction_switch_angle")
@@ -1359,7 +1352,6 @@ class COCOMO:
                                 cad,
                                 sad,
                                 pgate,
-                                rsoft * nanometer,
                             ],
                         )
                     continue
@@ -1377,17 +1369,12 @@ class COCOMO:
                     f.setName("interaction_switch")
                     switch_force = f
 
-                seen: set[tuple[int, int]] = set()
                 for i, j in intr.pairs:
-                    ia, jb = (int(i), int(j))
-                    if ia == jb:
+                    if i == j:
                         continue
+                    ia, jb = (int(i), int(j))
                     if ia > jb:
                         ia, jb = jb, ia
-                    key = (ia, jb)
-                    if key in seen:
-                        continue
-                    seen.add(key)
 
                     switch_force.addBond(
                         ia,
@@ -1409,17 +1396,12 @@ class COCOMO:
                     f.setName("interaction_go")
                     go_force = f
 
-                seen: set[tuple[int, int]] = set()
                 for i, j in intr.pairs:
-                    ia, jb = (int(i), int(j))
-                    if ia == jb:
+                    if i == j:
                         continue
+                    ia, jb = (int(i), int(j))
                     if ia > jb:
                         ia, jb = jb, ia
-                    key = (ia, jb)
-                    if key in seen:
-                        continue
-                    seen.add(key)
 
                     go_force.addBond(
                         ia,
@@ -1440,17 +1422,12 @@ class COCOMO:
                     f.setName("interaction_harmonic")
                     harmonic_force = f
 
-                seen: set[tuple[int, int]] = set()
                 for i, j in intr.pairs:
-                    ia, jb = (int(i), int(j))
-                    if ia == jb:
+                    if i == j:
                         continue
+                    ia, jb = (int(i), int(j))
                     if ia > jb:
                         ia, jb = jb, ia
-                    key = (ia, jb)
-                    if key in seen:
-                        continue
-                    seen.add(key)
 
                     harmonic_force.addBond(
                         ia,
