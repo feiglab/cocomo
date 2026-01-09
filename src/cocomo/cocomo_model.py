@@ -507,6 +507,8 @@ class COCOMO:
             else:
                 st = simulation.context.getState(getForces=True, groups=mask)
             arr = self._forces_to_array(st.getForces())
+            if not np.isfinite(arr).all():
+                return float("nan")
             if arr.size == 0:
                 return 0.0
             return float(np.linalg.norm(arr, axis=1).max())
@@ -522,6 +524,12 @@ class COCOMO:
             st = simulation.context.getState(getEnergy=True)
             pot = st.getPotentialEnergy().value_in_unit(kilojoule / mole)
             maxf = self._max_force(simulation)
+            if not np.isfinite(pot) or not np.isfinite(maxf):
+                dumped = self._dump_state(simulation)
+                msg = f"Non-finite diagnostics at step {simulation.currentStep}"
+                if dumped:
+                    msg += f" (state: {dumped})"
+                raise RuntimeError(msg)
 
             fields: list[str] = [
                 str(int(simulation.currentStep)),
@@ -534,6 +542,12 @@ class COCOMO:
                 e = simulation.context.getState(getEnergy=True, groups=mask)
                 eg = e.getPotentialEnergy().value_in_unit(kilojoule / mole)
                 fg = self._max_force(simulation, mask)
+                if not np.isfinite(eg) or not np.isfinite(fg):
+                    dumped = self._dump_state(simulation)
+                    msg = f"Non-finite {name} at step {simulation.currentStep}"
+                    if dumped:
+                        msg += f" (state: {dumped})"
+                    raise RuntimeError(msg)
                 fields.append(f"{eg:.8f}")
                 fields.append(f"{fg:.8f}")
 
@@ -558,7 +572,17 @@ class COCOMO:
                 pass
 
     def simulate(
-        self, *, nstep=1000, nout=1000, logfile=None, dcdfile=None, elogfile=None, forcelist=None
+        self,
+        *,
+        nstep=1000,
+        nout=1000,
+        logfile=None,
+        dcdfile=None,
+        elogfile=None,
+        diagfile=None,
+        forcelist=None,
+        force_limit=None,
+        dump_prefix=None,
     ):
         if self.simulation is not None:
             if dcdfile:
@@ -585,6 +609,15 @@ class COCOMO:
             if elogfile and forcelist:
                 log = self.EnergyReporter(elogfile, nout, self.get_force_groups(forcelist))
                 self.simulation.reporters.append(log)
+            if diagfile and forcelist:
+                diag = self.DiagnosticsReporter(
+                    diagfile,
+                    nout,
+                    self.get_force_groups(forcelist),
+                    force_limit=force_limit,
+                    dump_prefix=dump_prefix,
+                )
+                self.simulation.reporters.append(diag)
             self.simulation.step(nstep)
 
     def set_sasa(self, sasa=None):
@@ -1166,6 +1199,11 @@ class COCOMO:
                     cad = float(np.cos(ang))
                     sad = float(np.sin(ang))
                     pgate = float(getattr(intr, "pgate", 2.0))
+                    if pgate < 1.0:
+                        warnings.warn(
+                            "pgate < 1 can create singular forces at gate=0; " "clamping to 1.0"
+                        )
+                        pgate = 1.0
 
                     rsoft = float(getattr(intr, "rsoft", 0.0) or 0.0)
                     if rsoft <= 0.0:
@@ -1183,10 +1221,11 @@ class COCOMO:
                             "dist=sqrt(rsq)",
                             # --- ring A score ---
                             "scoreA2=scoreA*scoreA",
-                            "scoreA=cosA*cad+sqrt(sinA2)*sad",
+                            "scoreA=cosA*cad+sinA*sad",
                             "cosA2=cosA*cosA",
                             "sinA2=1-cosA2",
-                            "absDotA=sqrt(dotA*dotA+1e-12)",
+                            "sinA=sqrt(sinA2+1e-8)-1e-4",
+                            "absDotA=sqrt(dotA*dotA+1e-12)-1e-6",
                             "cosA=min(1,absDotA/sqrt(nA2*rsq))",
                             "dotA=nAx*dx+nAy*dy+nAz*dz",
                             "nA2=nAx*nAx+nAy*nAy+nAz*nAz+1e-4",
@@ -1207,10 +1246,11 @@ class COCOMO:
                             "a2z0=z5-z3",
                             # --- ring B score ---
                             "scoreB2=scoreB*scoreB",
-                            "scoreB=cosB*cad+sqrt(sinB2)*sad",
+                            "scoreB=cosB*cad+sinB*sad",
                             "cosB2=cosB*cosB",
                             "sinB2=1-cosB2",
-                            "absDotB=sqrt(dotB*dotB+1e-12)",
+                            "sinB=sqrt(sinB2+1e-8)-1e-4",
+                            "absDotB=sqrt(dotB*dotB+1e-12)-1e-6",
                             "cosB=min(1,absDotB/sqrt(nB2*rsq))",
                             "dotB=nBx*dx+nBy*dy+nBz*dz",
                             "nB2=nBx*nBx+nBy*nBy+nBz*nBz+1e-4",
