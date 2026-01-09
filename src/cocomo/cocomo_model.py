@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from itertools import combinations
 from math import copysign, sqrt
 from types import MappingProxyType
+from typing import Optional
 
 import mdtraj as md
 import numpy as np
@@ -451,8 +452,8 @@ class COCOMO:
             reportInterval: int,
             groups: Mapping[str, int],
             *,
-            force_limit: float | None = None,
-            dump_prefix: str | None = None,
+            force_limit: Optional[float] = None,
+            dump_prefix: Optional[str] = None,
         ) -> None:
             """Diagnostics logger for energy and max force.
 
@@ -501,7 +502,7 @@ class COCOMO:
                 out[i, 2] = float(v.z)
             return out
 
-        def _max_force(self, simulation, mask: int | None = None) -> float:
+        def _max_force(self, simulation, mask: Optional[int] = None) -> float:
             if mask is None:
                 st = simulation.context.getState(getForces=True)
             else:
@@ -513,7 +514,7 @@ class COCOMO:
                 return 0.0
             return float(np.linalg.norm(arr, axis=1).max())
 
-        def _dump_state(self, simulation) -> str | None:
+        def _dump_state(self, simulation) -> Optional[str]:
             if not self.dump_prefix:
                 return None
             fname = f"{self.dump_prefix}_step{simulation.currentStep}.xml"
@@ -1207,7 +1208,7 @@ class COCOMO:
 
                     rsoft = float(getattr(intr, "rsoft", 0.0) or 0.0)
                     if rsoft <= 0.0:
-                        rsoft = 0.2 * r0 if r0 > 0.0 else 0.2
+                        rsoft = 0.5 * r0 if r0 > 0.0 else 0.2
 
                     if switch_angle_force is None:
                         lx, ly, lz = map(float, self.box)
@@ -1216,17 +1217,23 @@ class COCOMO:
                             "-eps/(1+exp(u))*gate*wdist",
                             "wdist=rsq0/(rsq0+rsoft2)",
                             "rsoft2=rsoft*rsoft",
-                            "gate=(scoreA2*scoreB2)^pgate",
+                            # gate: smooth at 0/1, no sqrt(sin) terms
+                            "gate=g*g*(3-2*g)",
+                            "g=(scoreA2*scoreB2)^pgate",
+                            "scoreA2=cad2*cosA2+sad2*sinA2",
+                            "scoreB2=cad2*cosB2+sad2*sinB2",
+                            "cad2=cad*cad",
+                            "sad2=sad*sad",
                             "u=min(max(alpha*(dist-r0),-50),50)",
                             "dist=sqrt(rsq)",
-                            # --- ring A score ---
-                            "scoreA2=scoreA*scoreA",
-                            "scoreA=cosA*cad+sinA*sad",
-                            "cosA2=cosA*cosA",
+                            # --- ring A score (soft) ---
                             "sinA2=1-cosA2",
-                            "sinA=sqrt(sinA2+1e-8)-1e-4",
-                            "absDotA=sqrt(dotA*dotA+1e-12)-1e-6",
-                            "cosA=min(1,absDotA/sqrt(nA2*rsq))",
+                            "cosA2=1-posdA",
+                            "posdA=0.5*(dA+sqrt(dA*dA+1e-6))",
+                            "dA=1-cosA2r",
+                            "cosA2r=dotA2/denA",
+                            "denA=nA2*rsq+1e-6",
+                            "dotA2=dotA*dotA",
                             "dotA=nAx*dx+nAy*dy+nAz*dz",
                             "nA2=nAx*nAx+nAy*nAy+nAz*nAz+1e-4",
                             "nAx=a1y*a2z-a1z*a2y",
@@ -1244,14 +1251,14 @@ class COCOMO:
                             "a2x0=x5-x3",
                             "a2y0=y5-y3",
                             "a2z0=z5-z3",
-                            # --- ring B score ---
-                            "scoreB2=scoreB*scoreB",
-                            "scoreB=cosB*cad+sinB*sad",
-                            "cosB2=cosB*cosB",
+                            # --- ring B score (soft) ---
                             "sinB2=1-cosB2",
-                            "sinB=sqrt(sinB2+1e-8)-1e-4",
-                            "absDotB=sqrt(dotB*dotB+1e-12)-1e-6",
-                            "cosB=min(1,absDotB/sqrt(nB2*rsq))",
+                            "cosB2=1-posdB",
+                            "posdB=0.5*(dB+sqrt(dB*dB+1e-6))",
+                            "dB=1-cosB2r",
+                            "cosB2r=dotB2/denB",
+                            "denB=nB2*rsq+1e-6",
+                            "dotB2=dotB*dotB",
                             "dotB=nBx*dx+nBy*dy+nBz*dz",
                             "nB2=nBx*nBx+nBy*nBy+nBz*nBz+1e-4",
                             "nBx=b1y*b2z-b1z*b2y",
@@ -1270,7 +1277,7 @@ class COCOMO:
                             "b2y0=y8-y6",
                             "b2z0=z8-z6",
                             # --- site-site minimum-image distance ---
-                            "rsq=rsq0+1e-4",
+                            "rsq=rsq0+1e-6",
                             "rsq0=dx*dx+dy*dy+dz*dz",
                             "dx=dx0-Lx*floor(dx0/Lx+0.5)",
                             "dy=dy0-Ly*floor(dy0/Ly+0.5)",
