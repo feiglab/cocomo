@@ -186,7 +186,8 @@ class ComponentType:
             first = s[0]
             # linear floats (or ints)
             if isinstance(first, (int, float, np.floating, np.integer)):
-                return ComponentType._pairs_from_linear([float(x) for x in s])  # type: ignore[arg-type]
+                vals = [float(x) for x in s]  # type: ignore[arg-type]
+                return ComponentType._pairs_from_linear(vals)
             # pair-like
             if isinstance(first, (tuple, list, np.ndarray)) and len(first) == 2:
                 idx = np.asarray([p[0] for p in s], dtype=int)
@@ -653,7 +654,18 @@ class InteractionSet:
                     _contact_search_dirs=search_dirs,
                 )
 
-                key = f"{tag1}.{tag2}"
+                pair_key = f"{tag1}.{tag2}"
+                key = pair_key
+
+                if key in ints:
+                    base_key = f"{pair_key}:{ptable.name}"
+                    key = base_key
+                    if key in ints:
+                        i = 2
+                        while f"{base_key}#{i}" in ints:
+                            i += 1
+                        key = f"{base_key}#{i}"
+
                 ints[key] = intset
         finally:
             fh.close()
@@ -736,9 +748,8 @@ class Assembly:
             self.ctype[ctype.name] = ctype
 
     def add_interactions(self, intset: dict[str, InteractionSet]) -> None:
-        for k in intset.keys():
-            if k not in self.interact:
-                self.interact[k] = intset[k]
+        # Allow multiple interaction sets per component pair and support reload/override.
+        self.interact.update(intset)
 
     def add_component(self, comp: Component) -> None:
         self.add_type(comp.ctype)
