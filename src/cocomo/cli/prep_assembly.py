@@ -200,15 +200,30 @@ def main() -> None:
     s = PDBReader(str(pdb_path))
 
     surf = float(args.surf)
+
     components = _find(tdir, "components")
-    component_types = _find(tdir, "component_types_files")
-    interactions = _find(tdir, "interactions")
-    asm = Assembly(
-        components,
-        component_types,
-        structure=s,
-        interactions=interactions,
-    )
+
+    try:
+        component_types = _find(tdir, "component_types_files")
+    except FileNotFoundError:
+        try:
+            component_types = _find(tdir, "component_types")
+        except FileNotFoundError as e:
+            raise SystemExit(
+                "ERROR: could not find 'component_types_files' or 'component_types' "
+                "in . or parent directories."
+            ) from e
+
+    try:
+        interactions = _find(tdir, "interactions")
+    except FileNotFoundError:
+        interactions = None
+
+    if interactions is None:
+        asm = Assembly(components, component_types, structure=s)
+    else:
+        asm = Assembly(components, component_types, structure=s, interactions=interactions)
+
     sim = COCOMO(asm, box=(boxx, boxy, boxz), version=2, surfscale=surf)
 
     sim.setup_simulation(resources=resources, device=device, tstep=0.01)
@@ -217,6 +232,7 @@ def main() -> None:
     print(f"openmm energy: {sim.get_potentialEnergy()}")
 
     sim.minimize(nstep=1000)
+    print(f"openmm energy: {sim.get_potentialEnergy()}")
     sim.write_state("restart_0.xml")
     sim.write_pdb("min.pdb")
 

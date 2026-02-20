@@ -36,9 +36,11 @@ from openmm.app import (
     Topology,
     element,
 )
+from openmm.app.dcdfile import DCDFile
 from openmm.unit import (
     Quantity,
     amu,
+    angstrom,
     degrees,
     kelvin,
     kilojoule,
@@ -286,12 +288,14 @@ class COCOMO:
 
         if topology.__class__.__name__ == "Assembly":
             assembly = topology
+            self._assembly = assembly
             self.topology = assembly.model.topology()
             self.sasa = assembly.get_sasa()
             self.set_positions(assembly.model.positions())
             self.enmpairs = assembly.get_enmpairs()
             self.interactions = assembly.get_interactions()
         else:
+            self._assembly = None
             self.topology = topology
             self.set_sasa(sasa)
             self.set_positions(positions)
@@ -413,6 +417,120 @@ class COCOMO:
         if self.simulation is not None:
             tolerance = tol * kilojoule / (nanometer * mole)
             self.simulation.minimizeEnergy(tolerance=tolerance, maxIterations=nstep)
+
+    def _component_atom_groups(self) -> list[list[int]]:
+        if self._assembly is None:
+            raise ValueError("wrap_dcd_by_component requires initializing COCOMO with an Assembly")
+
+        chain_atoms: dict[str, list[int]] = {}
+        for ch in self.topology.chains():
+            cid = getattr(ch, "id", None)
+            key = str(cid) if cid is not None else str(ch.index)
+            chain_atoms[key] = [a.index for a in ch.atoms()]
+
+        groups: list[list[int]] = []
+        for comp in self._assembly.component:
+            idx: list[int] = []
+            for seg in comp.segment:
+                idx.extend(chain_atoms.get(str(seg), []))
+            if idx:
+                # ensure stable ordering + no duplicates
+                groups.append(sorted(set(idx)))
+
+        if not groups:
+            raise ValueError("No component atom groups found (segment<->chain.id mismatch?)")
+
+        return groups
+
+    class ComponentDCDReporter:
+        def __init__(
+            self,
+            file: str,
+            report_interval: int,
+            *,
+            groups: list[list[int]],
+        ) -> None:
+            self._file = file
+            self._interval = int(report_interval)
+            self._groups = groups
+            self._fh = None
+            self._dcd: DCDFile | None = None
+
+        def describeNextReport(self, simulation):
+            return (self._interval, True, False, False, False)
+
+        @staticmethod
+        def _orthorhombic_box_nm(state) -> tuple[float, float, float]:
+            a, b, c = state.getPeriodicBoxVectors()
+            tol = 1e-6
+            if abs(a.y) > tol or abs(a.z) > tol:
+                raise ValueError("wrap_dcd_by_component requires orthorhombic box vectors")
+            if abs(b.x) > tol or abs(b.z) > tol:
+                raise ValueError("wrap_dcd_by_component requires orthorhombic box vectors")
+            if abs(c.x) > tol or abs(c.y) > tol:
+                raise ValueError("wrap_dcd_by_component requires orthorhombic box vectors")
+            lx = float(a.x)
+            ly = float(b.y)
+            lz = float(c.z)
+            if lx <= 0.0 or ly <= 0.0 or lz <= 0.0:
+                raise ValueError("Invalid periodic box lengths")
+            return (lx, ly, lz)
+
+        @staticmethod
+        def _wrap_by_groups_nm(
+            pos_nm: np.ndarray,
+            groups: list[list[int]],
+            box_nm: tuple[float, float, float],
+        ) -> np.ndarray:
+            lx, ly, lz = box_nm
+            out = np.array(pos_nm, copy=True, dtype=float)
+
+            for g in groups:
+                xyz = out[g, :]
+                cen = xyz.mean(axis=0)
+
+                shift = np.array(
+                    [
+                        -np.floor(cen[0] / lx) * lx,
+                        -np.floor(cen[1] / ly) * ly,
+                        -np.floor(cen[2] / lz) * lz,
+                    ],
+                    dtype=float,
+                )
+                out[g, :] = xyz + shift
+
+            out[:, 0] -= np.floor(out[:, 0] / lx) * lx
+            out[:, 1] -= np.floor(out[:, 1] / ly) * ly
+            out[:, 2] -= np.floor(out[:, 2] / lz) * lz
+            return out
+
+        def report(self, simulation, state) -> None:
+            if self._dcd is None:
+                self._fh = open(self._file, "wb")
+                dt_ps = simulation.integrator.getStepSize().value_in_unit(picoseconds)
+                self._dcd = DCDFile(
+                    self._fh,
+                    simulation.topology,
+                    dt_ps,
+                    simulation.currentStep,
+                    self._interval,
+                )
+
+            box_nm = self._orthorhombic_box_nm(state)
+
+            pos = state.getPositions(asNumpy=True)
+            pos_nm = pos.value_in_unit(nanometer)
+
+            wrapped_nm = self._wrap_by_groups_nm(pos_nm, self._groups, box_nm)
+
+            self._dcd.writeModel(wrapped_nm * 10.0 * angstrom, state.getPeriodicBoxVectors())
+
+        def __del__(self) -> None:
+            try:
+                if self._fh is not None:
+                    self._fh.close()
+            except Exception:
+                pass
 
     class EnergyReporter:
         def __init__(self, file, reportInterval, bias_force_names_to_groups):
@@ -586,10 +704,15 @@ class COCOMO:
         forcelist=None,
         force_limit=None,
         dump_prefix=None,
+        wrap_dcd_by_component: bool = True,
     ):
         if self.simulation is not None:
             if dcdfile:
-                dcd = DCDReporter(dcdfile, nout)
+                if wrap_dcd_by_component and self._assembly is not None:
+                    groups = self._component_atom_groups()
+                    dcd = self.ComponentDCDReporter(dcdfile, nout, groups=groups)
+                else:
+                    dcd = DCDReporter(dcdfile, nout)
                 self.simulation.reporters.append(dcd)
             if logfile:
                 log = StateDataReporter(
