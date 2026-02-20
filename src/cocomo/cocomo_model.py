@@ -247,6 +247,7 @@ class COCOMO:
         params=None,  # default set from version
         eps=None,  # default set from version
         surfscale=None,  # default set from version
+        intercomp_repulsion=None,  # epsilon for repulsion between components
         box=100 * nanometer,  # 100 or (50,20,40), nm
         cuton=2.9,  # nm
         cutoff=3.1,  # nm
@@ -284,6 +285,10 @@ class COCOMO:
         self.cuton = cuton * nanometer
         self.cutoff = cutoff * nanometer
         self.switching = switching
+
+        self.intercomp_repulsion_eps = None
+        if intercomp_repulsion is not None:
+            self.intercomp_repulsion_eps = float(intercomp_repulsion) * kilojoule / mole
 
         self.enmforce = enmforce / nanometer**2
         self.enmcutoff = enmcutoff * nanometer
@@ -1034,6 +1039,7 @@ class COCOMO:
             self.setupAngleForce()
             self.setupLongRangeForce()
             self.setupShortRangeForce()
+            self.setupInterComponentRepulsionForce()
             self.setupENMForce()
             self.setupInteractionForce()
             if self.removecmmotion:
@@ -1244,6 +1250,77 @@ class COCOMO:
             force.setName("shortrange")
             self.forces["shortrange"] = force
             self.system.addForce(force)
+
+    def setupInterComponentRepulsionForce(self) -> None:
+        if self.topology is None or self.system is None:
+            return
+        if self.intercomp_repulsion_eps is None:
+            return
+        if self._assembly is None:
+            raise ValueError(
+                "intercomp_repulsion_eps requires initializing COCOMO with an Assembly"
+            )
+        if self.params is None:
+            self.set_params(self.version)
+
+        # Map chain.id -> atom indices for that chain
+        chain_atoms: dict[str, list[int]] = {}
+        for ch in self.topology.chains():
+            cid = getattr(ch, "id", None)
+            key = str(cid) if cid is not None else str(ch.index)
+            chain_atoms[key] = [a.index for a in ch.atoms()]
+
+        n = int(self.system.getNumParticles())
+        comp_id = [-1] * n
+        for c_idx, comp in enumerate(self._assembly.component):
+            idx: list[int] = []
+            for seg in comp.segment:
+                idx.extend(chain_atoms.get(str(seg), []))
+            for ai in set(idx):
+                comp_id[int(ai)] = int(c_idx)
+
+        if any(v < 0 for v in comp_id):
+            raise ValueError("Some beads were not assigned to any Assembly component")
+
+        # WCA repulsion, gated by component id (only inter-component pairs).
+        # Use-first, define-later, reverse order subexpressions.
+        eq = (
+            "U;"
+            "U = different * wca;"
+            "wca = step(rcut - r) * (lj + eps_rep);"
+            "lj = 4*eps_rep*(sr12 - sr6);"
+            "sr12 = sr6*sr6;"
+            "sr6 = sr2*sr2*sr2;"
+            "sr2 = (sigma/r)^2;"
+            "rcut = sigw * sigma;"
+            "sigma = 0.5*(sigma1 + sigma2);"
+            "different = step(abs(comp1 - comp2) - 0.5);"
+        )
+
+        f = CustomNonbondedForce(eq)
+        f.addGlobalParameter("eps_rep", self.intercomp_repulsion_eps)
+        f.addGlobalParameter("sigw", 2.0 ** (1.0 / 6.0))
+
+        # Reuse the same sigma definition as setupShortRangeForce()
+        f.addPerParticleParameter("sigma")
+        f.addPerParticleParameter("comp")
+
+        f.setNonbondedMethod(CustomNonbondedForce.CutoffPeriodic)
+        f.setCutoffDistance(self.cutoff)
+        f.setUseLongRangeCorrection(False)
+
+        for i, atom in enumerate(self.topology.atoms()):
+            sigma_i = self.params[atom.residue.name].radius * 2.0 * 2.0 ** (-1.0 / 6.0)
+            f.addParticle([sigma_i * nanometer, float(comp_id[i])])
+
+        if self.topology.getNumBonds() == 0:
+            self.set_bonds()
+        for b0, b1 in self.topology.bonds():
+            f.createExclusionsFromBonds([(b0.index, b1.index)], 1)
+
+        f.setName("intercomp_repulsion")
+        self.forces["intercomp_repulsion"] = f
+        self.system.addForce(f)
 
     def _findENMPairs(self) -> list[int, int, float]:
         if self.topology is None:
