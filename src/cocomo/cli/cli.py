@@ -3,8 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 
-from .__version__ import __version__
-from .cocomo_model import COCOMO
+from ..__version__ import __version__
+from ..cocomo_model import COCOMO
 
 
 def build_parser() -> argparse.ArgumentParser:

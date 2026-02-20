@@ -1,6 +1,6 @@
 [build-system]
-requires = ["hatchling>=1.25"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "cocomo"
@@ -34,7 +34,22 @@ dev = [
 Homepage = "https://github.com/feiglab/cocomo"
 
 [project.scripts]
-cocomo = "cocomo.cli:main"
+cocomo = "cocomo.cli.cocomo:main"
+calc_comp_cocomo = "bmc.cli.calc_comp_cocomo:main"
+assembly = "bmc.cli.assembly:main"
+prep_assembly = "bmc.cli.prep_assembly:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+script-files = [
+  "scripts/check_assembly_jobs.sh",
+  "scripts/run_assembly.sh",
+  "scripts/setup_assembly_job.sh",
+  "scripts/job.assembly.slurm.template",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.black]
 line-length = 100
@@ -43,12 +58,9 @@ target-version = ["py39"]
 [tool.ruff]
 line-length = 100
 target-version = "py39"
-select = ["E","F","I","UP"]
 src = ["src"]
-ignore = ["UP007", "UP045"]
 
 [tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
 ignore = ["UP007", "UP045"]
 
-[tool.hatch.metadata]
-allow-direct-references = true

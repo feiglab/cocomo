@@ -12,3 +12,5 @@ notebooks/
 plugins/
 .github/workflows/capppairs-wheels.yml
 src/cocomo/_plugin.py
+**/*.egg-info/
+src/*.egg-info/
