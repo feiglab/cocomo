@@ -127,6 +127,13 @@ def _parse_args(
     )
 
     p.add_argument(
+        "--repulsion",
+        type=float,
+        default=None,
+        help="repulsive inter component term",
+    )
+
+    p.add_argument(
         "--device",
         type=int,
         default=0,
@@ -194,6 +201,8 @@ def main() -> None:
         cfg["pdb_in"] = format_value(pdb_arg)
         cfg["box"] = format_value(box_str)
         cfg["surf"] = format_value(args.surf)
+        if args.repulsion is not None:
+            cfg["repulsion"] = format_value(args.repulsion)
         write_config(cfg_path, cfg)
 
     pdb_path = _find(tdir, pdb_arg)
@@ -224,7 +233,16 @@ def main() -> None:
     else:
         asm = Assembly(components, component_types, structure=s, interactions=interactions)
 
-    sim = COCOMO(asm, box=(boxx, boxy, boxz), version=2, surfscale=surf)
+    if args.repulsion is not None:
+        sim = COCOMO(
+            asm,
+            box=(boxx, boxy, boxz),
+            version=2,
+            surfscale=surf,
+            intercomp_repulsion=float(args.repulsion),
+        )
+    else:
+        sim = COCOMO(asm, box=(boxx, boxy, boxz), version=2, surfscale=surf)
 
     sim.setup_simulation(resources=resources, device=device, tstep=0.01)
     sim.write_system("system.xml")
