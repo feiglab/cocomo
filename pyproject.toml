@@ -35,9 +35,9 @@ Homepage = "https://github.com/feiglab/cocomo"
 
 [project.scripts]
 cocomo = "cocomo.cli.cocomo:main"
-calc_comp_cocomo = "bmc.cli.calc_comp_cocomo:main"
-assembly = "bmc.cli.assembly:main"
-prep_assembly = "bmc.cli.prep_assembly:main"
+calc_comp_cocomo = "cocomo.cli.calc_comp_cocomo:main"
+assembly = "cocomo.cli.assembly:main"
+prep_assembly = "cocomo.cli.prep_assembly:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
