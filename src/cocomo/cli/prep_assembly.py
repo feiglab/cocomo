@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+!/usr/bin/env python3
 
 from __future__ import annotations
 
@@ -93,6 +93,8 @@ def _apply_config_defaults(
         defaults["box"] = cfg["box"]
     if "surf" in cfg:
         defaults["surf"] = float(cfg["surf"])
+    if "repulsion" in cfg:
+        defaults["repulsion"] = float(cfg["repulsion"])
 
     if defaults:
         p.set_defaults(**defaults)
