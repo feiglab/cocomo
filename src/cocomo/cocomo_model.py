@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import os
 import warnings
 from collections.abc import Iterator, Mapping, Sequence
@@ -11,6 +12,7 @@ from typing import Optional
 
 import mdtraj as md
 import numpy as np
+from mdsim.molecule_data import PDBWriter
 from openmm import (
     CMMotionRemover,
     CustomBondForce,
@@ -361,8 +363,26 @@ class COCOMO:
             except Exception:
                 self.parameters = None
 
-    def write_pdb(self, fname="state.pdb"):
-        positions = self.simulation.context.getState(getPositions=True).getPositions()
+    def write_pdb(self, fname: str = "state.pdb") -> None:
+        if self.simulation is None:
+            raise RuntimeError("Simulation is not initialized")
+
+        state = self.simulation.context.getState(getPositions=True)
+        positions = state.getPositions(asNumpy=True)
+
+        # Prefer the topology/IDs from the Assembly's reference model when available.
+        model = getattr(self, "_assembly", None)
+        ref_model = None
+        if model is not None:
+            ref_model = getattr(model, "model", None)
+
+        if ref_model is not None:
+            out_model = copy.deepcopy(ref_model)
+            out_model.set_positions(positions)
+            PDBWriter().write(out_model, fname)
+            return
+
+        # Fallback: use OpenMM writer if we don't have an Assembly-backed model.
         with open(fname, "w") as f:
             PDBFile.writeFile(self.simulation.topology, positions, f)
 
