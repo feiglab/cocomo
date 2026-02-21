@@ -30,13 +30,13 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--tstep",
         type=float,
-        default=0.004,
+        default=0.01,
         help="Timestep",
     )
     p.add_argument(
         "--gamma",
         type=float,
-        default=0.1,
+        default=1.0,
         help="Langevin friction (1/ps)",
     )
     p.add_argument(
