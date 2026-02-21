@@ -4,7 +4,7 @@ shopt -s nullglob
 
 tag="${1:-run}"
 
-for n in set*; do
+for n in $(printf "%s\n" set* | sort -V); do
   # Only process directories
   [[ -d "$n" ]] || continue
 
