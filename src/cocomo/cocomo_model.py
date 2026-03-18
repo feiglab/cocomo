@@ -1753,25 +1753,49 @@ class COCOMO:
         self.system.addForce(force)
 
     def set_umbrella_xyz_distance(
-        self, groupa, groupb, *, direction="x", target=0.0, k=10.0, center="cog"
+        self,
+        groupa,
+        groupb,
+        *,
+        direction="x",
+        target=0.0,
+        k=10.0,
+        center="cog",
+        side="both",
     ):
-        if self.system:
-            bias = f"0.5 * uk_{direction} * ((abs({direction}2 - {direction}1) - target)^2)"
-            force = CustomCentroidBondForce(2, bias)
-            force.addPerBondParameter("target")  # target distance (nm)
-            force.addGlobalParameter(f"uk_{direction}", k * kilojoule / mole / nanometer**2)
-            if center.lower() == "cog":
-                force.addGroup(groupa, [1.0] * len(groupa))
-                force.addGroup(groupb, [1.0] * len(groupb))
-            elif center.lower() == "com":
-                force.addGroup(groupa)
-                force.addGroup(groupb)
-            else:
-                raise ValueError(f"Center option {center} is not valid.")
+        if not self.system:
+            return
 
-            force.addBond([0, 1], [target * nanometer])
-            force.setName(f"Umbrella_{direction}")
-            self.system.addForce(force)
+        delta = f"{direction}2 - {direction}1"
+
+        if side == "both":
+            bias = f"0.5 * uk_{direction} * ((abs({delta}) - target)^2)"
+        elif side == "above":
+            bias = f"0.5 * uk_{direction} * step(({delta}) - target) " f"* (({delta}) - target)^2"
+        elif side == "below":
+            bias = f"0.5 * uk_{direction} * step(target - ({delta})) " f"* (target - ({delta}))^2"
+        else:
+            raise ValueError("side must be 'both', 'above', or 'below'.")
+
+        force = CustomCentroidBondForce(2, bias)
+        force.addPerBondParameter("target")
+        force.addGlobalParameter(
+            f"uk_{direction}",
+            k * kilojoule / mole / nanometer**2,
+        )
+
+        if center.lower() == "cog":
+            force.addGroup(groupa, [1.0] * len(groupa))
+            force.addGroup(groupb, [1.0] * len(groupb))
+        elif center.lower() == "com":
+            force.addGroup(groupa)
+            force.addGroup(groupb)
+        else:
+            raise ValueError(f"Center option {center} is not valid.")
+
+        force.addBond([0, 1], [target * nanometer])
+        force.setName(f"Umbrella_{direction}")
+        self.system.addForce(force)
 
     def update_umbrella_xyz_distance(self, direction="x", k=10.0):
         if self.system and self.simulation:
