@@ -1752,6 +1752,36 @@ class COCOMO:
         force.setName("PositionalRestraints")
         self.system.addForce(force)
 
+    @staticmethod
+    def _umbrella_side_bias(delta: str, kname: str, side: str) -> str:
+        if side == "both":
+            return f"0.5 * {kname} * (({delta})^2)"
+        if side == "above":
+            return f"0.5 * {kname} * step(({delta})) * (({delta})^2)"
+        if side == "below":
+            return f"0.5 * {kname} * step(-({delta})) * (({delta})^2)"
+        raise ValueError("side must be 'both', 'above', or 'below'.")
+
+    def _find_umbrella_centroid_force(
+        self,
+        name: str,
+        *,
+        bias: Optional[str] = None,
+    ) -> Optional[CustomCentroidBondForce]:
+        if self.system is None:
+            return None
+
+        for force in self.system.getForces():
+            if not isinstance(force, CustomCentroidBondForce):
+                continue
+            if force.getName() != name:
+                continue
+            if bias is not None and force.getEnergyFunction() != bias:
+                raise ValueError(f"{name} already exists with a different energy function.")
+            return force
+
+        return None
+
     def set_umbrella_xyz_distance(
         self,
         groupa,
@@ -1804,31 +1834,56 @@ class COCOMO:
             )
 
     def set_umbrella_distance(
-        self, groupa, groupb, *, target=0.0, k=10.0, periodic=False, center="cog"
+        self,
+        groupa,
+        groupb,
+        *,
+        target=0.0,
+        k=10.0,
+        periodic=False,
+        center="cog",
+        side="both",
+        tag="distance",
     ):
-        if self.system:
-            bias = "0.5 * uk_dist * ((distance(g1,g2) - target)^2)"
-            force = CustomCentroidBondForce(2, bias)
-            force.addPerBondParameter("target")  # target distance (nm)
-            force.addGlobalParameter("uk_dist", k * kilojoule / mole / nanometer**2)
-            if center.lower() == "cog":
-                force.addGroup(groupa, [1.0] * len(groupa))
-                force.addGroup(groupb, [1.0] * len(groupb))
-            elif center.lower() == "com":
-                force.addGroup(groupa)
-                force.addGroup(groupb)
-            else:
-                raise ValueError(f"Center option {center} is not valid.")
+        if not self.system:
+            return
 
-            force.addBond([0, 1], [target * nanometer])
-            if self.box_vectors and periodic:
-                force.setUsesPeriodicBoundaryConditions(True)
-            force.setName("Umbrella_distance")
+        name = f"Umbrella_{tag}"
+        kname = "uk_dist" if tag == "distance" else f"uk_{tag}"
+        bias = self._umbrella_side_bias("d - target", kname, side)
+        bias += "; d = distance(g1, g2)"
+
+        force = self._find_umbrella_centroid_force(name, bias=bias)
+        if force is None:
+            force = CustomCentroidBondForce(2, bias)
+            force.addPerBondParameter("target")
+            force.addGlobalParameter(
+                kname,
+                k * kilojoule / mole / nanometer**2,
+            )
+            force.setName(name)
             self.system.addForce(force)
 
-    def update_umbrella_distance(self, k=10.0):
+        if center.lower() == "cog":
+            idx_a = force.addGroup(groupa, [1.0] * len(groupa))
+            idx_b = force.addGroup(groupb, [1.0] * len(groupb))
+        elif center.lower() == "com":
+            idx_a = force.addGroup(groupa)
+            idx_b = force.addGroup(groupb)
+        else:
+            raise ValueError(f"Center option {center} is not valid.")
+
+        force.addBond([idx_a, idx_b], [target * nanometer])
+        if self.box_vectors and periodic:
+            force.setUsesPeriodicBoundaryConditions(True)
+
+    def update_umbrella_distance(self, k=10.0, *, tag="distance"):
         if self.system and self.simulation:
-            self.simulation.context.setParameter("uk_dist", k * kilojoule / mole / nanometer**2)
+            kname = "uk_dist" if tag == "distance" else f"uk_{tag}"
+            self.simulation.context.setParameter(
+                kname,
+                k * kilojoule / mole / nanometer**2,
+            )
 
     def _compute_center(self, group, positions_nm, *, center="cog"):
         """Compute the center (COG or COM) of `group` using positions in nm.
@@ -2083,47 +2138,42 @@ class COCOMO:
         target=np.radians(0),
         k=10.0,
         center="cog",
+        side="both",
+        tag="angle_norm",
     ):
         """
-        Harmonic umbrella on the angle between two plane normals (groups A and B).
+        Umbrella on the angle between two plane normals (groups A and B).
 
         Angle is in radians; target is in radians; k is in kJ/mol/rad^2.
         """
         if not self.system:
             return
 
-        bias = (
-            # Harmonic in the angle between plane normals
-            "0.5 * uk_angle_norm * (theta - target)^2;"
-            # angle in [0, pi]: y >= 0 ensures atan2 ∈ [0, pi]
-            "theta = atan2(sinang, cosang);"
+        name = f"Umbrella_{tag}"
+        kname = f"uk_{tag}"
+        bias = self._umbrella_side_bias("theta - target", kname, side)
+        bias += (
+            ";theta = atan2(sinang, cosang);"
             "sinang = magCross / denom;"
             "cosang = dotAB / denom;"
-            # denom ~ |nA||nB| via dot/cross identity, with small epsilon to avoid 0
             "denom = sqrt(dotAB*dotAB + magCross*magCross) + 1e-8;"
             "magCross = sqrt(cx*cx + cy*cy + cz*cz);"
-            # nA × nB
             "cx = nyA_tmp*nzB_tmp - nzA_tmp*nyB_tmp;"
             "cy = nzA_tmp*nxB_tmp - nxA_tmp*nzB_tmp;"
             "cz = nxA_tmp*nyB_tmp - nyA_tmp*nxB_tmp;"
-            # nA · nB
             "dotAB = nxA_tmp*nxB_tmp + nyA_tmp*nyB_tmp + nzA_tmp*nzB_tmp;"
-            # plane A normal nA = vA1 × vA2
             "nxA_tmp = vA1y*vA2z - vA1z*vA2y;"
             "nyA_tmp = vA1z*vA2x - vA1x*vA2z;"
             "nzA_tmp = vA1x*vA2y - vA1y*vA2x;"
-            # plane B normal nB = vB1 × vB2
             "nxB_tmp = vB1y*vB2z - vB1z*vB2y;"
             "nyB_tmp = vB1z*vB2x - vB1x*vB2z;"
             "nzB_tmp = vB1x*vB2y - vB1y*vB2x;"
-            # in-plane vectors for plane A: (A1-A0) and (A2-A0)
             "vA1x = x2 - x1;"
             "vA1y = y2 - y1;"
             "vA1z = z2 - z1;"
             "vA2x = x3 - x1;"
             "vA2y = y3 - y1;"
             "vA2z = z3 - z1;"
-            # in-plane vectors for plane B: (B1-B0) and (B2-B0)
             "vB1x = x5 - x4;"
             "vB1y = y5 - y4;"
             "vB1z = z5 - z4;"
@@ -2132,37 +2182,44 @@ class COCOMO:
             "vB2z = z6 - z4;"
         )
 
-        force = CustomCentroidBondForce(6, bias)
-        force.addPerBondParameter("target")  # radians
-        force.addGlobalParameter("uk_angle_norm", k * kilojoule / (mole * radian**2))
+        force = self._find_umbrella_centroid_force(name, bias=bias)
+        if force is None:
+            force = CustomCentroidBondForce(6, bias)
+            force.addPerBondParameter("target")
+            force.addGlobalParameter(
+                kname,
+                k * kilojoule / (mole * radian**2),
+            )
+            force.setName(name)
+            self.system.addForce(force)
 
-        # group order: (A0, A1, A2, B0, B1, B2)
         if center.lower() == "cog":
-            force.addGroup(groupa, [1.0] * len(groupa))
-            force.addGroup(groupa1, [1.0] * len(groupa1))
-            force.addGroup(groupa2, [1.0] * len(groupa2))
-            force.addGroup(groupb, [1.0] * len(groupb))
-            force.addGroup(groupb1, [1.0] * len(groupb1))
-            force.addGroup(groupb2, [1.0] * len(groupb2))
+            idx_a = force.addGroup(groupa, [1.0] * len(groupa))
+            idx_a1 = force.addGroup(groupa1, [1.0] * len(groupa1))
+            idx_a2 = force.addGroup(groupa2, [1.0] * len(groupa2))
+            idx_b = force.addGroup(groupb, [1.0] * len(groupb))
+            idx_b1 = force.addGroup(groupb1, [1.0] * len(groupb1))
+            idx_b2 = force.addGroup(groupb2, [1.0] * len(groupb2))
         elif center.lower() == "com":
-            force.addGroup(groupa)
-            force.addGroup(groupa1)
-            force.addGroup(groupa2)
-            force.addGroup(groupb)
-            force.addGroup(groupb1)
-            force.addGroup(groupb2)
+            idx_a = force.addGroup(groupa)
+            idx_a1 = force.addGroup(groupa1)
+            idx_a2 = force.addGroup(groupa2)
+            idx_b = force.addGroup(groupb)
+            idx_b1 = force.addGroup(groupb1)
+            idx_b2 = force.addGroup(groupb2)
         else:
             raise ValueError(f"Center option {center} is not valid.")
 
-        force.addBond([0, 1, 2, 3, 4, 5], [target * radian])
+        force.addBond(
+            [idx_a, idx_a1, idx_a2, idx_b, idx_b1, idx_b2],
+            [target * radian],
+        )
 
-        force.setName("Umbrella_angle_norm")
-        self.system.addForce(force)
-
-    def update_umbrella_angle_norm(self, k=10.0):
+    def update_umbrella_angle_norm(self, k=10.0, *, tag="angle_norm"):
         if self.system and self.simulation:
             self.simulation.context.setParameter(
-                "uk_angle_norm", k * kilojoule / (mole * radian**2)
+                f"uk_{tag}",
+                k * kilojoule / (mole * radian**2),
             )
 
     def set_umbrella_dihedral(
@@ -2175,55 +2232,39 @@ class COCOMO:
         target=0.0,
         k=10.0,
         center="cog",
+        side="both",
         tag="dihedral",
     ):
         """
-        Harmonic umbrella on the dihedral angle between four centroids.
+        Umbrella on the dihedral angle between four centroids.
 
-        The minimum is at the dihedral = target (in radians), using a 2π-periodic
-        quadratic distance: we choose the smallest of (Δ, Δ+2π, Δ-2π).
-
-        Parameters
-        ----------
-        groupa, groupb, groupc, groupd : sequence[int]
-            Atom indices for the four centroid groups.
-        target : float
-            Target dihedral angle in radians.
-        k : float
-            Force constant in kJ/mol/rad^2. Only used on first creation;
-            later calls just add more bonds. Adjust at runtime with
-            `update_umbrella_dihedral`.
+        The restraint uses the wrapped signed deviation in [-pi, pi), so
+        one-sided `side` modes work across the periodic boundary.
         """
         if not self.system:
             return
 
-        # Try to find an existing Umbrella_dihedral force
-        force = None
-        for f in self.system.getForces():
-            if isinstance(f, CustomCentroidBondForce) and f.getName() == f"Umbrella_{tag}":
-                force = f
-                break
+        name = f"Umbrella_{tag}"
+        kname = f"uk_{tag}"
+        bias = self._umbrella_side_bias("delta", kname, side)
+        bias += (
+            ";delta = delta_raw - 2*pi*floor((delta_raw + pi)/(2*pi));"
+            "pi = acos(-1);"
+            "delta_raw = d - target;"
+            "d = dihedral(g1, g2, g3, g4);"
+        )
 
+        force = self._find_umbrella_centroid_force(name, bias=bias)
         if force is None:
-            # Create the force the first time
-            bias = (
-                f"0.5 * uk_{tag} * delta^2; "
-                "delta = delta - 2*pi*floor((delta + pi)/(2*pi));"
-                "pi = acos(-1);"
-                "delta = d - target;"
-                "d = dihedral(g1, g2, g3, g4);"
-            )
-
             force = CustomCentroidBondForce(4, bias)
-            force.addPerBondParameter("target")  # radians
+            force.addPerBondParameter("target")
             force.addGlobalParameter(
-                f"uk_{tag}",
+                kname,
                 k * kilojoule / (mole * radian**2),
             )
-            force.setName(f"Umbrella_{tag}")
+            force.setName(name)
             self.system.addForce(force)
 
-        # For each call, add new centroid groups + a new bond
         if center.lower() == "cog":
             idx_a = force.addGroup(groupa, [1.0] * len(groupa))
             idx_b = force.addGroup(groupb, [1.0] * len(groupb))
@@ -2241,7 +2282,10 @@ class COCOMO:
 
     def update_umbrella_dihedral(self, k=10.0, *, tag="dihedral"):
         if self.system and self.simulation:
-            self.simulation.context.setParameter(f"uk_{tag}", k * kilojoule / mole / radian**2)
+            self.simulation.context.setParameter(
+                f"uk_{tag}",
+                k * kilojoule / mole / radian**2,
+            )
 
     def set_umbrella_angle(
         self,
@@ -2252,38 +2296,33 @@ class COCOMO:
         target=np.pi / 2.0,
         k=10.0,
         center="cog",
+        side="both",
+        tag="angle",
     ):
         """
-        Harmonic umbrellas on an angle defined by centroid triplets.
+        Umbrella on an angle defined by centroid triplets.
 
-        Angle is in radians; restrained to `target`.
-
-        The angle is:
-          - angle(groupa, groupb, groupc)
-
-        All angle restraints share the same global force constant `uk_angle`.
+        Angle is in radians and is restrained relative to `target`.
         """
         if not self.system:
             return
 
-        # Try to find an existing Umbrella_angle force
-        force = None
-        for f in self.system.getForces():
-            if isinstance(f, CustomCentroidBondForce) and f.getName() == "Umbrella_angle":
-                force = f
-                break
+        name = f"Umbrella_{tag}"
+        kname = f"uk_{tag}"
+        bias = self._umbrella_side_bias("theta - target", kname, side)
+        bias += "; theta = angle(g1, g2, g3)"
 
+        force = self._find_umbrella_centroid_force(name, bias=bias)
         if force is None:
-            # Create the force the first time
-            bias = "0.5 * uk_angle * (angle(g1, g2, g3) - target)^2"
             force = CustomCentroidBondForce(3, bias)
-            force.addPerBondParameter("target")  # radians
-            force.addGlobalParameter("uk_angle", k * kilojoule / (mole * radian**2))
-            force.setName("Umbrella_angle")
-
+            force.addPerBondParameter("target")
+            force.addGlobalParameter(
+                kname,
+                k * kilojoule / (mole * radian**2),
+            )
+            force.setName(name)
             self.system.addForce(force)
 
-        # For each call, add new centroid groups + a new bond
         if center.lower() == "cog":
             idx_a = force.addGroup(groupa, [1.0] * len(groupa))
             idx_b = force.addGroup(groupb, [1.0] * len(groupb))
@@ -2297,9 +2336,12 @@ class COCOMO:
 
         force.addBond([idx_a, idx_b, idx_c], [target * radian])
 
-    def update_umbrella_angle(self, k=10.0):
+    def update_umbrella_angle(self, k=10.0, *, tag="angle"):
         if self.system and self.simulation:
-            self.simulation.context.setParameter("uk_angle", k * kilojoule / mole / radian**2)
+            self.simulation.context.setParameter(
+                f"uk_{tag}",
+                k * kilojoule / mole / radian**2,
+            )
 
     def setupCMMotionRemover(self) -> None:
         if self.topology is not None and self.removecmmotion:
