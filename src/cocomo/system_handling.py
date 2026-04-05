@@ -579,7 +579,7 @@ class InteractionSet:
                         pairs.append((int(i), int(j)))
         return pairs
 
-    # Helper: probability -> strength with transform, offset, scale, clamp>=0
+    # Helper: probability -> strength with transform, offset, scale, clamp>=0 if not asis
     def _strength_from_probability(self, p: float) -> float:
         # guard against exact 0/1 for log/ratio
         eps = 1e-12
@@ -594,7 +594,10 @@ class InteractionSet:
             # fallback to 'asis' if unknown
             x = p
         y = (x + float(self.offset)) * float(self.scale)
-        return y if y > 0.0 else 0.0
+        if self.value in {"logit", "neglog"}:
+            return y if y > 0.0 else 0.0
+        else:
+            return y
 
     @staticmethod
     def read_list(
