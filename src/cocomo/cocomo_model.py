@@ -548,7 +548,12 @@ class COCOMO:
 
             wrapped_nm = self._wrap_by_groups_nm(pos_nm, self._groups, box_nm)
 
-            self._dcd.writeModel(wrapped_nm * 10.0 * angstrom, state.getPeriodicBoxVectors())
+            unit_cell = Vec3(box_nm[0], box_nm[1], box_nm[2]) * nanometer
+            self._dcd.writeModel(
+                wrapped_nm * nanometer,
+                unitCellDimensions=unit_cell,
+            )
+
 
         def __del__(self) -> None:
             try:
