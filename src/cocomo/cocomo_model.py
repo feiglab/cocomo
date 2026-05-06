@@ -42,7 +42,6 @@ from openmm.app.dcdfile import DCDFile
 from openmm.unit import (
     Quantity,
     amu,
-    angstrom,
     degrees,
     kelvin,
     kilojoule,
@@ -553,7 +552,6 @@ class COCOMO:
                 wrapped_nm * nanometer,
                 unitCellDimensions=unit_cell,
             )
-
 
         def __del__(self) -> None:
             try:
