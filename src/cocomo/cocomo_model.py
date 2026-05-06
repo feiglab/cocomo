@@ -481,7 +481,8 @@ class COCOMO:
             self._dcd: DCDFile | None = None
 
         def describeNextReport(self, simulation):
-            return (self._interval, True, False, False, False)
+            # steps, positions, velocities, forces, energies, enforcePeriodicBox
+            return (self._interval, True, False, False, False, False)
 
         @staticmethod
         def _orthorhombic_box_nm(state) -> tuple[float, float, float]:
@@ -506,26 +507,17 @@ class COCOMO:
             groups: list[list[int]],
             box_nm: tuple[float, float, float],
         ) -> np.ndarray:
-            lx, ly, lz = box_nm
+            box = np.asarray(box_nm, dtype=float)
             out = np.array(pos_nm, copy=True, dtype=float)
 
-            for g in groups:
-                xyz = out[g, :]
-                cen = xyz.mean(axis=0)
+            for group in groups:
+                idx = np.asarray(group, dtype=int)
+                xyz = out[idx, :]
 
-                shift = np.array(
-                    [
-                        -np.floor(cen[0] / lx) * lx,
-                        -np.floor(cen[1] / ly) * ly,
-                        -np.floor(cen[2] / lz) * lz,
-                    ],
-                    dtype=float,
-                )
-                out[g, :] = xyz + shift
+                center = xyz.mean(axis=0)
+                shift = -np.floor(center / box) * box
 
-            out[:, 0] -= np.floor(out[:, 0] / lx) * lx
-            out[:, 1] -= np.floor(out[:, 1] / ly) * ly
-            out[:, 2] -= np.floor(out[:, 2] / lz) * lz
+                out[idx, :] = xyz + shift
             return out
 
         def report(self, simulation, state) -> None:
