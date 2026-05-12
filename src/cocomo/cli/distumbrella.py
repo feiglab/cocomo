@@ -7,7 +7,7 @@ from pathlib import Path
 
 from cocomo import COCOMO
 
-from .tileumbrella_shared import format_bias_tag, parse_bias_target
+from .distumbrella_shared import format_bias_tag
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -21,7 +21,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         dest="biasstr",
         type=str,
         default="6.00",
-        help="Single bias or bias:biasangle target",
+        help="Single bias target",
     )
 
     p.add_argument(
@@ -87,7 +87,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
 
-    biasval = parse_bias_target(str(args.biasstr))
+    biasval = float(args.biasstr)
 
     if not (1.0 <= biasval <= 20.0):
         raise SystemExit("ERROR: bias must be in [1.0, 20.0]")
