@@ -130,7 +130,7 @@ def main() -> None:
     box_units = box_nm.as_units()
 
     pdb_out = "dimer.protein.pdb"
-    system_xml = "system_xml"
+    system_xml = "system.xml"
     initial_xml = "initial.xml"
 
     if bool(args.write_config):
