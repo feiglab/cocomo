@@ -38,9 +38,9 @@ cocomo = "cocomo.cli.cocomo:main"
 calc_comp_cocomo = "cocomo.cli.calc_comp_cocomo:main"
 assembly = "cocomo.cli.assembly:main"
 prep_assembly = "cocomo.cli.prep_assembly:main"
-prep_distumbrella = "cocomo.cli.prep_distumbrella:main"
-equi_distumbrella = "cocomo.cli.equi_distumbrella:main"
-initbias_distumbrella = "cocomo.cli.initbias_distumbrella:main"
+prep_distumbrella_cocomo = "cocomo.cli.prep_distumbrella:main"
+equi_distumbrella_cocomo = "cocomo.cli.equi_distumbrella:main"
+initbias_distumbrella_cocomo = "cocomo.cli.initbias_distumbrella:main"
 
 
 [tool.setuptools]
@@ -50,6 +50,12 @@ script-files = [
   "scripts/run_assembly.sh",
   "scripts/setup_assembly_job.sh",
   "scripts/job.assembly.slurm.template",
+  "scripts/check_distumbrella_jobs_cocomo.sh",
+  "scripts/combine_distumbrella_cocomo.sh",
+  "scripts/job.distumbrella.cocomo.slurm.template",
+  "scripts/run_distumbrella_cocomo.sh",
+  "scripts/setup_distumbrella_jobs_cocomo.sh",
+  "scripts/submit_distumbrella_jobs_cocomo.sh",
 ]
 
 [tool.setuptools.packages.find]
