@@ -42,6 +42,7 @@ prep_distumbrella_cocomo = "cocomo.cli.prep_distumbrella:main"
 equi_distumbrella_cocomo = "cocomo.cli.equi_distumbrella:main"
 initbias_distumbrella_cocomo = "cocomo.cli.initbias_distumbrella:main"
 distumbrella_cocomo = "cocomo.cli.distumbrella:main"
+distumbrella_analysis_cocomo = "cocomo.cli.distumbrella_analysis:main"
 
 
 [tool.setuptools]
