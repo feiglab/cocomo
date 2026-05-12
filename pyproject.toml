@@ -38,6 +38,10 @@ cocomo = "cocomo.cli.cocomo:main"
 calc_comp_cocomo = "cocomo.cli.calc_comp_cocomo:main"
 assembly = "cocomo.cli.assembly:main"
 prep_assembly = "cocomo.cli.prep_assembly:main"
+prep_distumbrella = "cocomo.cli.prep_distumbrella:main"
+equi_distumbrella = "cocomo.cli.equi_distumbrella:main"
+initbias_distumbrella = "cocomo.cli.initbias_distumbrella:main"
+
 
 [tool.setuptools]
 package-dir = {"" = "src"}
