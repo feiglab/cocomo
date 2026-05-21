@@ -79,11 +79,12 @@ class ResidueParameters(Mapping[str, ResPar]):
 
     def __post_init__(self) -> None:
         # Deep-freeze the mapping to prevent mutation after construction
-        object.__setattr__(self, "residues", MappingProxyType(dict(self.residues)))
+        frozen = {str(k).upper(): _coerce_respar(v, name=str(k)) for k, v in self.residues.items()}
+        object.__setattr__(self, "residues", MappingProxyType(frozen))
 
     # Mapping interface so params[resname] works
     def __getitem__(self, key: str) -> ResPar:
-        return self.residues[key]
+        return self.residues[str(key).upper()]
 
     def __iter__(self) -> Iterator[str]:
         return iter(self.residues)
@@ -92,7 +93,60 @@ class ResidueParameters(Mapping[str, ResPar]):
         return len(self.residues)
 
     def get(self, key: str, default=None):
-        return self.residues.get(key, default)
+        return self.residues.get(str(key).upper(), default)
+
+    def with_updates(self, updates: Mapping[str, object] | None = None) -> ResidueParameters:
+        """Return a new immutable parameter set with residue updates applied.
+
+        ``updates`` may contain values that are already ``ResPar`` instances,
+        dictionaries with ResPar field names, or six-element sequences in the
+        ResPar field order: mass, charge, radius, epsilon, azero, surface.
+        """
+        if updates is None:
+            return self
+        merged = dict(self.residues)
+        for key, value in updates.items():
+            merged[str(key).upper()] = _coerce_respar(value, name=str(key))
+        return ResidueParameters(merged)
+
+
+def _coerce_respar(value: object, *, name: str = "residue") -> ResPar:
+    if isinstance(value, ResPar):
+        return value
+
+    if isinstance(value, Mapping):
+        try:
+            return ResPar(
+                mass=float(value["mass"]),
+                charge=float(value["charge"]),
+                radius=float(value["radius"]),
+                epsilon=float(value["epsilon"]),
+                azero=float(value["azero"]),
+                surface=float(value.get("surface", 0.0)),
+            )
+        except KeyError as exc:
+            missing = exc.args[0]
+            raise ValueError(f"Missing parameter {missing!r} for residue {name!r}") from exc
+
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        if len(value) != 6:
+            raise ValueError(
+                f"Residue {name!r} parameters must have six values: "
+                "mass, charge, radius, epsilon, azero, surface"
+            )
+        mass, charge, radius, epsilon, azero, surface = value
+        return ResPar(
+            float(mass),
+            float(charge),
+            float(radius),
+            float(epsilon),
+            float(azero),
+            float(surface),
+        )
+
+    raise TypeError(
+        f"Residue {name!r} parameters must be a ResPar, mapping, or six-element sequence"
+    )
 
 
 # --- Parameters ---------------------------------------------------------
@@ -272,12 +326,12 @@ class COCOMO:
         self.box_vectors = None
         self.parameters = None
 
-        self.params = params
-        self.eps = eps
-        self.surfscale = surfscale
+        self.params = None
+        self.eps = None
+        self.surfscale = None
 
         self.version = 2 if version is None else version
-        self.set_params(self.version)
+        self.set_params(self.version, params=params, eps=eps, surfscale=surfscale)
 
         self.removecmmotion = removecmmotion
         self.k0 = kappa * nanometer
@@ -2351,22 +2405,32 @@ class COCOMO:
         st: State = context.getState(getEnergy=True, groups=mask)
         return st.getPotentialEnergy()
 
-    def set_params(self, version=None):
+    def set_params(self, version=None, *, params=None, eps=None, surfscale=None):
+        """Set COCOMO defaults, then apply user overrides.
+
+        User-supplied ``params`` are treated as residue-level updates to the
+        versioned default parameter set. They may add new residue names or
+        overwrite existing residue names. Values may be ``ResPar`` instances,
+        dictionaries with ResPar field names, or six-element sequences in
+        ResPar field order.
+
+        User-supplied ``eps`` is treated as a dictionary overlay on the
+        versioned epsilon defaults. ``surfscale`` replaces the versioned
+        default only when it is not ``None``.
+        """
         if version is not None and version == 1:
-            if self.params is None:
-                self.params = RESIDUE_PARAMS_V1
-            if self.eps is None:
-                self.eps = EPS_V1
-            if self.surfscale is None:
-                self.surfscale = None
+            default_params = RESIDUE_PARAMS_V1
+            default_eps = EPS_V1
+            default_surfscale = None
         else:
             # default is version 2
-            if self.params is None:
-                self.params = RESIDUE_PARAMS_V2
-            if self.eps is None:
-                self.eps = EPS_V2
-            if self.surfscale is None:
-                self.surfscale = surf_scale_v2
+            default_params = RESIDUE_PARAMS_V2
+            default_eps = EPS_V2
+            default_surfscale = surf_scale_v2
+
+        self.params = default_params.with_updates(params)
+        self.eps = {**default_eps, **dict(eps or {})}
+        self.surfscale = default_surfscale if surfscale is None else surfscale
 
     def set_bonds(self):
         if self.topology is not None:
