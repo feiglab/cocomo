@@ -2,14 +2,26 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: $(basename "$0") <nsteps>" >&2
+  echo "Usage: $(basename "$0") <nsteps> [tstep]" >&2
   exit 2
 }
 
 nstep="${1:-}"
+tstep="${2:-0.03}"
 [[ -n "$nstep" ]] || usage
 
-tstep=0.03
+if (( $# > 2 )); then
+  usage
+fi
+if ! [[ "$nstep" =~ ^[0-9]+$ ]]; then
+  echo "invalid nsteps value: '$nstep' (expected integer)" >&2
+  exit 1
+fi
+if ! [[ "$tstep" =~ ^[0-9]+([.][0-9]+)?([eE][-+]?[0-9]+)?$ ]]; then
+  echo "invalid tstep value: '$tstep' (expected positive number)" >&2
+  exit 1
+fi
+
 gamma=1.0
 
 # Read last (default 0)
