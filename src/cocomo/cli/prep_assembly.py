@@ -253,6 +253,7 @@ def main() -> None:
 
     sim.minimize(nstep=1000)
     print(f"openmm energy: {sim.get_potentialEnergy()}")
+    sim.set_velocities()
     sim.write_state("restart_0.xml")
     sim.write_pdb("min.pdb")
 
