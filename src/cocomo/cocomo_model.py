@@ -2080,22 +2080,58 @@ class COCOMO:
 
         # --- helpers --------------------------------------------------------
         def _norm_xyz(t):
-            """Return (x,y,z) in nm as floats from Quantity or 3-sequence."""
+            """Return an (x, y, z) tuple in nm."""
             if hasattr(t, "value_in_unit"):
-                arr = t.value_in_unit(nanometer)
-                return float(arr[0]), float(arr[1]), float(arr[2])
-            # assume 3-sequence of numbers
-            return float(t[0]), float(t[1]), float(t[2])
+                arr = np.asarray(
+                    t.value_in_unit(nanometer),
+                    dtype=float,
+                )
+            else:
+                values = []
+                for value in t:
+                    if hasattr(value, "value_in_unit"):
+                        value_nm = np.asarray(
+                            value.value_in_unit(nanometer),
+                            dtype=float,
+                        )
+                        if value_nm.ndim != 0:
+                            raise ValueError(
+                                "Each XYZ coordinate must be scalar; " f"got shape {value_nm.shape}"
+                            )
+                        values.append(float(value_nm))
+                    else:
+                        values.append(float(value))
 
-        def _is_scalar_xyz(seq):
-            """Heuristic: 3 non-sequence elements -> treat as single xyz."""
-            if not isinstance(seq, Sequence):
-                return False
-            if len(seq) != 3:
-                return False
-            for v in seq:
-                if isinstance(v, Sequence) and not hasattr(v, "value_in_unit"):
+                arr = np.asarray(values, dtype=float)
+
+            if arr.shape != (3,):
+                raise ValueError(f"XYZ target must have shape (3,), got {arr.shape}")
+
+            return tuple(float(value) for value in arr)
+
+        def _is_scalar_xyz(value):
+            """Return True only when value represents one XYZ vector."""
+            if hasattr(value, "value_in_unit"):
+                arr = np.asarray(value.value_in_unit(nanometer))
+                return arr.shape == (3,)
+
+            try:
+                if len(value) != 3:
                     return False
+            except TypeError:
+                return False
+
+            # Each of the three elements must be a scalar coordinate.
+            # A list of three vector Quantities is therefore not one XYZ vector.
+            for component in value:
+                if hasattr(component, "value_in_unit"):
+                    arr = np.asarray(component.value_in_unit(nanometer))
+                else:
+                    arr = np.asarray(component)
+
+                if arr.ndim != 0:
+                    return False
+
             return True
 
         # --- build per-group reference coordinates --------------------------
